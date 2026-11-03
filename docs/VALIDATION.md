@@ -27,6 +27,34 @@ The held-out point is inside the Phase 1 bar of +-30%. Two findings went into th
 Remaining bias: 2-bit K-quants cost more compute per byte than Q8_0 (+24% on Q2_K). A
 per-type efficiency table is the next refinement.
 
+## Phase 2: streaming engine, measured vs planner
+
+Same machine. `banach-engine` on Granite 3.1 1B-A400M Q8_0 (expert pool 1.28 GB), cold
+start, 1,740-token prompt, 48 greedy tokens, policy admit, 16 fetch threads.
+`banach plan --ctx 1790` with RAM set to dense + KV + the expert budget, uncalibrated.
+
+| setup | measured tok/s | measured hit | predicted tok/s (range) | predicted hit | error |
+|---|---|---|---|---|---|
+| fully resident | 16.45 | 100% | 18.21 (16.68 to 19.68) | 100% | +10.6% |
+| 800 MB budget | 7.65 | 85.1% | 9.13 (7.17 to 11.26) | 84.7% | +19.5% |
+| 520 MB budget | 5.49 | 67.4% | 6.59 (5.06 to 8.38) | 72.9% | +20.2% |
+| 300 MB budget | 3.76 | 46.2% | 5.07 (3.89 to 6.50) | 60.1% | +34.9% |
+
+Three of four are inside +-30% uncalibrated; the 300 MB miss comes from the hit curve
+(60% predicted, 46% measured), and the measurement sits at the bottom of the predicted range.
+Calibrating on the resident run alone (time scale 0.903) puts all four within +-22%.
+End to end, `banach run` planned a 600 MB budget and predicted 7.07 tok/s (5.46 to 8.90) on
+a second prompt; the engine measured 6.47 (+9%).
+
+Changes made to the model from these runs: NVMe reads no longer overlap compute
+(`overlap` 0: demand fetch blocks the layer), and attention cost is the KV read at 0.2 of
+memory bandwidth (stock llama.cpp went from 30.7 to 18.6 tok/s between a short context and
+1,740 tokens on this machine).
+
+Byte-exact oracle: `engine/exact_check.sh` passed all 12 configurations (naive and banach
+modes, LRU and admit policies, budgets of 20%, 50% and 100%), tokens and logits bit-equal to
+stock llama.cpp at every step.
+
 ## Phase 1: weights-free preflight on DeepSeek V4 Flash
 
 `banach inspect hf:unsloth/DeepSeek-V4-Flash-GGUF/UD-Q4_K_XL/DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf`

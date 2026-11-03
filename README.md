@@ -13,6 +13,10 @@ measuring fidelity against the exact model on your own traffic.
   verdict needs K1/K2 and traces on a machine with 128 GB or more.
 - Phase 1 (probe, preflight, planner, preflight card): working; predicted vs measured
   within the +-30% bar on held-out data. See [docs/VALIDATION.md](docs/VALIDATION.md).
+- Phase 2 (lossless streaming): `banach-engine` keeps a RAM budget for routed experts with
+  parallel whole-expert fetch, frequency-gated admission and background eviction;
+  byte-identical to stock llama.cpp in every tested configuration; 2.1x over naive page
+  faulting at the same budget. `banach run` plans the budget and launches it.
 
 The headline target is chosen from the Phase 0 verdict; see
 [docs/spec/BANACH-SPEC.md, section 0](docs/spec/BANACH-SPEC.md).
@@ -35,6 +39,7 @@ cargo build --release
 | `docs/spec/` | Specifications. Precedence: BANACH-SPEC, then SPEC-DERISK, SPEC-MATH, SPEC-LADDER, SPEC-SYSTEM |
 | `src/` | `banach` (Rust): hardware probe, GGUF header parser (local or HTTP range), model profile, planner, preflight card |
 | `phase1/machines/` | reference hardware profiles for planning other machines (`banach plan --hw`) |
+| `engine/` | `banach-engine`, lossless expert streaming on llama.cpp, plus the byte-exact oracle script |
 | `tracer/` | `banach-trace`, the llama.cpp routing tracer (Phase 0.1) |
 | `phase0/` | Phase 0 analysis: trace import, cache simulator, entropy floor, ladder sweep, fidelity certificate, decode model, K1/K2 benchmark scripts |
 

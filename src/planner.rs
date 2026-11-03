@@ -4,6 +4,7 @@
 //! Decode time per token, per step:
 //!   t_mem     = sum over memory tiers of bytes read there / (bandwidth * efficiency)
 //!               + miss bytes / RAM bandwidth (missed experts land in RAM first)
+//!               + KV bytes read over the context / (bandwidth * attention efficiency)
 //!   t_cpu     = 2 * active params / (cpu flops * cpu efficiency)
 //!   t_compute = max(t_mem, t_cpu) + (1 - compute_overlap) * min(t_mem, t_cpu)
 //!   t_io      = miss bytes / disk bandwidth
@@ -31,13 +32,22 @@ pub struct Calibration {
     pub cpu_eff: f64,
     /// How much compute hides under memory traffic: 1 = max(t_mem, t_cpu), 0 = sum.
     pub compute_overlap: f64,
-    /// Fraction of compute time NVMe reads can hide under.
+    /// Fraction of compute time NVMe reads can hide under. 0 for demand fetch (the Phase 2
+    /// engine blocks a layer until its experts are in); lookahead prefetch raises it.
     pub overlap: f64,
+    /// Attention reads the KV cache at this fraction of memory bandwidth (CPU attention is far
+    /// from streaming speed).
+    #[serde(default = "default_attn_eff")]
+    pub attn_eff: f64,
     /// Fixed per-token overhead per layer, seconds.
     pub sync_per_layer: f64,
     /// Multiplier on predicted time from a measured run (1.0 = uncalibrated).
     pub time_scale: f64,
     pub calibrated_on: Option<String>,
+}
+
+fn default_attn_eff() -> f64 {
+    0.2
 }
 
 impl Default for Calibration {
@@ -49,7 +59,8 @@ impl Default for Calibration {
             mem_eff: 0.85,
             cpu_eff: 0.18,
             compute_overlap: 0.0,
-            overlap: 0.8,
+            overlap: 0.0,
+            attn_eff: 0.2,
             sync_per_layer: 2.0e-5,
             time_scale: 1.0,
             calibrated_on: None,
@@ -192,8 +203,9 @@ struct Speed {
     nvme_bytes: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn speed(m: &ModelProfile, t: &Tiers, cal: &Calibration, hw: &Hardware, p: &Placement, hit: f64,
-         expert_scale: f64, bw_scale: f64) -> Speed {
+         expert_scale: f64, bw_scale: f64, ctx: u64) -> Speed {
     let routed = m.routed_read_bytes as f64 * expert_scale;
     let hot = (p.hot_vram + p.hot_ram) as f64;
     // share of hits served from VRAM (uniform-usage approximation)
@@ -208,6 +220,10 @@ fn speed(m: &ModelProfile, t: &Tiers, cal: &Calibration, hw: &Hardware, p: &Plac
     }
     let ram_read = if dense_on_gpu { 0.0 } else { m.dense_read_bytes as f64 } + hit_bytes * (1.0 - vram_share) + miss_bytes;
     t_mem += ram_read / (t.ram_bw * bw_scale);
+    // attention over a context of `ctx` tokens (KV on the same tier as the dense path)
+    let kv_read = (m.kv_bytes_per_token * ctx) as f64;
+    let kv_bw = if dense_on_gpu { t.vram_bw.unwrap_or(t.ram_bw) } else { t.ram_bw };
+    t_mem += kv_read / (kv_bw * cal.attn_eff * bw_scale);
     // CPU work: the share of active parameters not handled by the GPU
     let cpu_share = if dense_on_gpu { (1.0 - vram_share) * routed / (routed + m.dense_read_bytes as f64) } else { 1.0 };
     let t_cpu = 2.0 * m.active_params as f64 * cpu_share / (hw.cpu_flops * cal.cpu_eff);
@@ -243,9 +259,9 @@ fn plan_for(name: &str, m: &ModelProfile, hw: &Hardware, c: &Constraints, cal: &
             Range { low: hit_model(frac, a * 1.35), mid: hit_model(frac, a), high: hit_model(frac, a * 0.75) }
         }
     };
-    let s_lo = speed(m, &t, cal, hw, &p, hits.low, expert_scale, 0.9);
-    let s_mid = speed(m, &t, cal, hw, &p, hits.mid, expert_scale, 1.0);
-    let s_hi = speed(m, &t, cal, hw, &p, hits.high, expert_scale, 1.1);
+    let s_lo = speed(m, &t, cal, hw, &p, hits.low, expert_scale, 0.9, c.ctx);
+    let s_mid = speed(m, &t, cal, hw, &p, hits.mid, expert_scale, 1.0, c.ctx);
+    let s_hi = speed(m, &t, cal, hw, &p, hits.high, expert_scale, 1.1, c.ctx);
     let mut notes = Vec::new();
     if t.disk_assumed && hot < n_total {
         notes.push(format!("disk bandwidth assumed {:.1} GB/s (run `banach probe --disk <model file>`)", t.disk_bw / GB));

@@ -19,8 +19,12 @@ usage:
   banach inspect MODEL [--json]
       read the model header only (local path, https URL, or hf:owner/repo/file.gguf)
   banach plan MODEL [--ctx N] [--min-tok-s X] [--usage FILE] [--hw FILE] [--json]
+      (--ctx is the context length decode runs at; attention cost grows with it)
       preflight card: predicted speed and fidelity per plan, before downloading weights
       (--hw plans for another machine from its saved hardware.json)
+  banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--exact-check]
+      plan, then decode with banach-engine using the planned RAM budget for routed experts
+      (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
   banach calibrate MODEL --measured TOK_S [--label TEXT]
       fit the cost model to one measured decode run of MODEL on this machine
 
@@ -57,7 +61,8 @@ fn parse_args(raw: &[String], with_value: &[&str]) -> Result<Args, String> {
     let mut i = 0;
     while i < raw.len() {
         let s = &raw[i];
-        if let Some(name) = s.strip_prefix("--") {
+        let name = s.strip_prefix("--").or_else(|| s.strip_prefix('-').filter(|n| with_value.contains(n)));
+        if let Some(name) = name {
             if with_value.contains(&name) {
                 let v = raw.get(i + 1).ok_or_else(|| format!("--{name} needs a value"))?;
                 a.flags.insert(name.to_string(), v.clone());
@@ -306,6 +311,79 @@ fn cmd_calibrate(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn engine_path() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("BANACH_ENGINE") {
+        return Ok(PathBuf::from(p));
+    }
+    if let Ok(me) = std::env::current_exe() {
+        let side = me.with_file_name("banach-engine");
+        if side.exists() {
+            return Ok(side);
+        }
+    }
+    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
+        let c = Path::new(dir).join("banach-engine");
+        if c.exists() {
+            return Ok(c);
+        }
+    }
+    Err("banach-engine not found: build engine/ and set BANACH_ENGINE or put it next to banach".into())
+}
+
+fn cmd_run(a: &Args) -> Result<(), String> {
+    let spec = a.pos.first().ok_or("run needs a local MODEL path")?;
+    if spec.starts_with("hf:") || spec.starts_with("http") {
+        return Err("run needs the model on local disk (lazy download arrives in Phase 4)".into());
+    }
+    let hw = hardware(&home().join("hardware.json"))?;
+    let l = load_model(spec)?;
+    let c = constraints(a)?;
+    let cal = load_json::<Calibration>(&cal_path(&l.profile)).unwrap_or_default();
+    let r = planner::plan(&l.profile, &hw, &c, &cal);
+    let exact = r.plans.iter().find(|p| p.lossless).ok_or_else(|| r.verdict.clone())?;
+    let budget_mb: f64 = match a.flags.get("budget-mb") {
+        Some(v) => v.parse().map_err(|_| "bad --budget-mb")?,
+        None => {
+            let experts = exact.hot_experts as f64 * l.profile.expert_bytes as f64;
+            if exact.hot_experts >= l.profile.n_experts * l.profile.n_moe_layers { 0.0 } else { experts / 1e6 }
+        }
+    };
+    eprintln!(
+        "plan: Exact, predicted {:.2} tok/s ({:.2} to {:.2}); expert budget {}",
+        exact.tok_s.mid,
+        exact.tok_s.low,
+        exact.tok_s.high,
+        if budget_mb > 0.0 { format!("{budget_mb:.0} MB") } else { "unlimited (fits)".into() }
+    );
+    let mut cmd = std::process::Command::new(engine_path()?);
+    cmd.arg("-m").arg(spec).arg("-c").arg(c.ctx.to_string());
+    if let Some(p) = a.flags.get("p") {
+        cmd.arg("-p").arg(p);
+    }
+    if let Some(f) = a.flags.get("f") {
+        cmd.arg("-f").arg(f);
+    }
+    if let Some(n) = a.flags.get("n") {
+        cmd.arg("-n").arg(n);
+    }
+    if budget_mb > 0.0 {
+        cmd.arg("--budget-mb").arg(format!("{budget_mb:.0}"));
+    }
+    if a.switches.contains("exact-check") {
+        cmd.arg("--exact-check");
+    }
+    let heat = home().join(format!("heat-{}.txt", l.profile.name.replace(|c: char| !c.is_ascii_alphanumeric(), "_")));
+    if heat.exists() {
+        cmd.arg("--heat-in").arg(&heat);
+    }
+    cmd.arg("--heat-out").arg(&heat);
+    let status = cmd.status().map_err(|e| format!("starting banach-engine: {e}"))?;
+    if !status.success() {
+        return Err(format!("banach-engine exited with {status}"));
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = raw.first().cloned() else {
@@ -317,6 +395,7 @@ fn main() -> ExitCode {
         "probe" => parse_args(rest, &["disk", "mem-mb"]).and_then(|a| cmd_probe(&a)),
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
+        "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb"]).and_then(|a| cmd_run(&a)),
         "calibrate" => parse_args(rest, &["ctx", "measured", "label", "usage"]).and_then(|a| cmd_calibrate(&a)),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
