@@ -238,11 +238,14 @@ struct LayerBuf {
     std::vector<float>   gates;  // [T][k]
     std::vector<float>   onorm;  // [T][k]
     std::vector<float>   xnorm;  // [T]
+    std::vector<float>   xvec;   // [T][n_embd], only while --dump-x wants more tokens
     bool have_topk = false, have_gates = false, have_onorm = false, have_xnorm = false;
 };
 
 struct Tracer {
     bool recording = false;
+    bool want_x = false;  // keep the raw MoE input vectors of this ubatch
+    int64_t n_embd = 0;
     int k = -1;
     int64_t n_tok = 0;                    // tokens in the current ubatch
     std::map<int, LayerBuf> layers;       // by llama layer index, for the current ubatch
@@ -320,11 +323,13 @@ static bool eval_cb(ggml_tensor * t, bool ask, void * ud) {
         const int64_t E = x->ne[0], R = x->ne[1];
         if (x->ne[2] != T) throw std::runtime_error("moe input token count mismatch");
         L.xnorm.assign((size_t) T, 0.0f);
+        if (tr->want_x) { L.xvec.assign((size_t) (T * E), 0.0f); tr->n_embd = E; }
         for (int64_t tt = 0; tt < T; tt++) {
             double acc = 0;
             const float * p = v.data() + (size_t) (tt * R * E);  // first row of the token
             for (int64_t e = 0; e < E; e++) acc += (double) p[e] * p[e];
             L.xnorm[tt] = (float) std::sqrt(acc);
+            if (tr->want_x) std::copy(p, p + E, L.xvec.begin() + tt * E);
         }
         L.have_xnorm = true;
     }
@@ -354,6 +359,7 @@ struct Args {
     std::string model, corpus, out;
     int ctx = 6144, ubatch = 512, threads = 0, ntop = 20, warmup = 1;
     long max_tokens = 0;
+    long dump_x = 0;
     bool no_chat_template = false;
 };
 
@@ -366,7 +372,9 @@ static void usage() {
         "  --top N     next-token log-probs kept per token (default 20)\n"
         "  --max-tokens N  stop after N recorded tokens\n"
         "  --warmup N  unrecorded warm-up decodes before tracing (default 1)\n"
-        "  --raw       never apply the chat template to \"messages\"\n");
+        "  --raw       never apply the chat template to \"messages\"\n"
+        "  --dump-x N  also write the MoE input vectors of the first N tokens to OUT.x.bin\n"
+        "              (float32 [N][moe layer][n_embd], for the eps profiler)\n");
 }
 
 static Args parse_args(int argc, char ** argv) {
@@ -386,6 +394,7 @@ static Args parse_args(int argc, char ** argv) {
         else if (s == "--top") a.ntop = std::stoi(next());
         else if (s == "--max-tokens") a.max_tokens = std::stol(next());
         else if (s == "--warmup") a.warmup = std::stoi(next());
+        else if (s == "--dump-x") a.dump_x = std::stol(next());
         else if (s == "--raw") a.no_chat_template = true;
         else if (s == "-h" || s == "--help") { usage(); exit(0); }
         else { fprintf(stderr, "unknown argument %s\n", s.c_str()); usage(); exit(2); }
@@ -522,6 +531,12 @@ int main(int argc, char ** argv) {
 
         FILE * fbin = fopen((a.out + ".bin").c_str(), "wb");
         if (!fbin) throw std::runtime_error("cannot write " + a.out + ".bin");
+        FILE * fx = nullptr;
+        long x_written = 0;
+        if (a.dump_x > 0) {
+            fx = fopen((a.out + ".x.bin").c_str(), "wb");
+            if (!fx) throw std::runtime_error("cannot write " + a.out + ".x.bin");
+        }
 
         std::map<std::string, int> workload_ids;
         std::vector<std::string> workload_names;
@@ -550,6 +565,7 @@ int main(int argc, char ** argv) {
                 int n = std::min<int>(a.ubatch, (int) toks.size() - p);
                 if (a.max_tokens) n = (int) std::min<long>(n, a.max_tokens - recorded);
                 if (n <= 0) break;
+                tr.want_x = fx && x_written < a.dump_x;
                 decode(toks.data() + p, n, p);
 
                 if (tr.moe_layers.empty()) {
@@ -614,6 +630,14 @@ int main(int argc, char ** argv) {
                         }
                     }
                     if (fwrite(rec.data(), 1, rec.size(), fbin) != rec.size()) throw std::runtime_error("write failed");
+                    if (tr.want_x && x_written < a.dump_x) {
+                        for (int li = 0; li < lay.L; li++) {
+                            LayerBuf & B = tr.layers[tr.moe_layers[li]];
+                            if (B.xvec.empty()) throw std::runtime_error("no MoE input captured for --dump-x");
+                            fwrite(B.xvec.data() + (size_t) i * tr.n_embd, sizeof(float), (size_t) tr.n_embd, fx);
+                        }
+                        x_written++;
+                    }
                 }
                 recorded += n;
             }
@@ -622,6 +646,7 @@ int main(int argc, char ** argv) {
                     s.workload.c_str(), recorded);
         }
         fclose(fbin);
+        if (fx) fclose(fx);
 
         char desc[256];
         llama_model_desc(model, desc, sizeof desc);
@@ -651,6 +676,7 @@ int main(int argc, char ** argv) {
         fj << "],\n";
         fj << "  \"top_k\": " << lay.k << ",\n";
         fj << "  \"n_experts\": " << n_expert << ",\n";
+        fj << "  \"x_tokens\": " << x_written << ",\n  \"n_embd\": " << tr.n_embd << ",\n";
         fj << "  \"n_vocab\": " << n_vocab << ",\n";
         fj << "  \"ctx\": " << a.ctx << ",\n  \"ubatch\": " << a.ubatch << ",\n";
         fj << "  \"workload_names\": [";

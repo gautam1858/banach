@@ -68,7 +68,12 @@ def cmd_entropy(a: argparse.Namespace) -> None:
 
 
 def cmd_certify(a: argparse.Namespace) -> None:
-    d = np.loadtxt(a.flips, dtype=float).ravel()
+    raw = np.loadtxt(a.flips, dtype=float, ndmin=2)
+    d = raw[:, 0]
+    if a.min_margin is not None:
+        if raw.shape[1] < 2:
+            raise SystemExit("--min-margin needs a flips file with a margin column (banach-engine --flips-out)")
+        d = d[raw[:, 1] >= a.min_margin]
     c = fidelity.certify(d, a.p0, a.alpha)
     json.dump(c.as_dict(), sys.stdout, indent=1)
     print()
@@ -123,6 +128,27 @@ def cmd_usage(a: argparse.Namespace) -> None:
     print(f"wrote {a.out}: {t.n_layers} layers x {t.n_experts} experts from {t.n_tokens} tokens")
 
 
+def cmd_eps(a: argparse.Namespace) -> None:
+    from . import eps as eps_mod
+    if a.real:
+        e, n_layer, n_expert, fb = eps_mod.profile_real(a.exact, a.low, a.real, a.activation, quantile=a.quantile)
+        eps_mod.save(e, a.out)
+        moe = e[(e != 1.0).any(axis=1)]
+        print(f"wrote {a.out}: {n_layer} layers x {n_expert} experts from real inputs ({fb:.1%} fell back to all tokens); "
+              f"eps median {np.median(moe):.4g}, p95 {np.quantile(moe, 0.95):.4g}, max/min {moe.max() / moe.min():.2f}")
+        return
+    xn = a.xnorm
+    if a.trace:
+        xn = float(np.median(Trace.load(a.trace).xnorm))
+    if not xn:
+        raise SystemExit("give --xnorm or --trace (for the typical MoE input norm)")
+    e, n_layer, n_expert = eps_mod.profile(a.exact, a.low, xn, a.samples, a.activation, quantile=a.quantile)
+    eps_mod.save(e, a.out)
+    moe = e[(e != 1.0).any(axis=1)]
+    print(f"wrote {a.out}: {n_layer} layers x {n_expert} experts, input norm {xn:.2f}; "
+          f"eps median {np.median(moe):.4g}, p95 {np.quantile(moe, 0.95):.4g}, max/min {moe.max() / moe.min():.2f}")
+
+
 def cmd_predict(a: argparse.Namespace) -> None:
     model = MODELS[a.model]
     machine = perfmodel.Machine("cli", dram_bw=a.dram_gbs * GB, nvme_bw=a.nvme_gbs * GB,
@@ -169,7 +195,8 @@ def main(argv: list[str] | None = None) -> None:
     s.set_defaults(fn=cmd_entropy)
 
     s = sub.add_parser("certify", help="betting certificate on a 0/1 flip file (P0.5)")
-    s.add_argument("flips", help="text file of 0/1 top-1 disagreements, one per token")
+    s.add_argument("flips", help="text file of 0/1 top-1 disagreements, one per token (optional margin column)")
+    s.add_argument("--min-margin", type=float, help="only tokens whose exact top-1/top-2 margin is at least this")
     s.add_argument("--p0", type=float, default=0.01)
     s.add_argument("--alpha", type=float, default=0.05)
     s.set_defaults(fn=cmd_certify)
@@ -194,6 +221,18 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--out", required=True)
     s.add_argument("--workload", help="only this workload")
     s.set_defaults(fn=cmd_usage)
+
+    s = sub.add_parser("eps", help="per-expert ladder error profile for banach-engine --eps (P0.4)")
+    s.add_argument("exact", help="GGUF with the exact (reference) experts")
+    s.add_argument("low", help="GGUF with the low-bit experts, same model")
+    s.add_argument("--out", required=True)
+    s.add_argument("--trace", help="routing trace (.npz) to take the median MoE input norm from")
+    s.add_argument("--real", help="banach-trace .json written with --dump-x: profile on real routed inputs")
+    s.add_argument("--xnorm", type=float, default=0.0)
+    s.add_argument("--samples", type=int, default=32)
+    s.add_argument("--quantile", type=float, default=0.5)
+    s.add_argument("--activation", default="silu", choices=["silu", "gelu"])
+    s.set_defaults(fn=cmd_eps)
 
     s = sub.add_parser("predict", help="bandwidth model tok/s (P0.6)")
     s.add_argument("--model", default=DEEPSEEK_V4_FLASH.name, choices=sorted(MODELS))

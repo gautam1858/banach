@@ -149,7 +149,12 @@ struct Stats {
     void reset() { *this = Stats(); }
 };
 
+struct LadderCount {
+    uint64_t slots = 0, low = 0;
+};
+
 struct Engine {
+    LadderCount * ladder_count = nullptr;
     Mode mode = Mode::Off;
     Policy policy = Policy::Admit;
     double half_life = 256;  // in decode steps (one step = one ubatch through all layers)
@@ -421,8 +426,16 @@ static bool layer_of(const char * name, const char * prefix, int & il) {
 
 static bool eval_cb(ggml_tensor * t, bool ask, void * ud) {
     auto * E = (Engine *) ud;
-    if (E->mode == Mode::Off) return ask ? false : true;
     int il;
+    if (E->ladder_count && layer_of(t->name, "banach_ids_lo", il)) {
+        if (ask) return true;
+        for (int v : read_ids(t)) {
+            E->ladder_count->slots++;
+            if (v >= 0) E->ladder_count->low++;
+        }
+        return true;
+    }
+    if (E->mode == Mode::Off) return ask ? false : true;
     const bool is_topk = layer_of(t->name, "ffn_moe_topk", il);
     const bool is_mm = t->op == GGML_OP_MUL_MAT_ID;
     if (ask) return is_topk || (E->discovering && is_mm);
@@ -454,6 +467,11 @@ struct Args {
     std::string model, prompt, prompt_file, heat_in, heat_out, json_out;
     Policy policy = Policy::Admit;
     bool async_evict = true, pageout = false;
+    std::string ladder, eps_file, flips_out;
+    double tau = INFINITY;
+    double min_margin = 0.1;  // confident tokens: exact top-1 beats top-2 by this many nats
+    std::vector<double> taus;  // --fidelity sweep
+    bool fidelity = false;
     double half_life = 256;
     int n_gen = 64, threads = 0, io_threads = 8, ctx = 4096, ubatch = 512;
     double budget_mb = 0;
@@ -473,6 +491,11 @@ static void usage() {
         "  --policy lru|admit        eviction LRU; admit adds frequency-gated admission (default admit)\n"
         "  --half-life N             decay of usage frequency in decode steps (default 256)\n"
         "  --sync-evict / --pageout  evict on the critical path / with MADV_PAGEOUT (for comparison)\n"
+        "  --ladder LOW.gguf         precision ladder: serve slots from LOW unless gate*eps*|x| > tau\n"
+        "  --eps FILE / --tau T      per-expert eps table (text: one float per line, layer-major) / threshold\n"
+        "  --fidelity T1,T2,...      teacher-forced sweep over tau: top-1 flips and KL against exact\n"
+        "  --flips-out PREFIX        with --fidelity: write PREFIX.<tau>.txt: per token, flip and exact margin\n"
+        "  --min-margin M            confident tokens have an exact top-1/top-2 margin >= M nats (default 0.1)\n"
         "  --warm                    keep whatever is in the page cache (default: start cold)\n"
         "  --heat-in F / --heat-out F  warm-start heat file\n"
         "  --exact-check             also run stock llama.cpp and compare tokens and logits bit for bit\n"
@@ -510,6 +533,17 @@ static Args parse(int argc, char ** argv) {
         }
         else if (s == "--half-life") a.half_life = std::stod(next());
         else if (s == "--sync-evict") a.async_evict = false;
+        else if (s == "--ladder") a.ladder = next();
+        else if (s == "--eps") a.eps_file = next();
+        else if (s == "--tau") a.tau = std::stod(next());
+        else if (s == "--fidelity") {
+            a.fidelity = true;
+            std::stringstream ss(next());
+            std::string item;
+            while (std::getline(ss, item, ',')) if (!item.empty()) a.taus.push_back(std::stod(item));
+        }
+        else if (s == "--flips-out") a.flips_out = next();
+        else if (s == "--min-margin") a.min_margin = std::stod(next());
         else if (s == "--pageout") a.pageout = true;
         else if (s == "--heat-in") a.heat_in = next();
         else if (s == "--heat-out") a.heat_out = next();
@@ -643,6 +677,131 @@ static std::string stats_json(const char * name, const Stats & s, double seconds
     return o.str();
 }
 
+// ---------------------------------------------------------------- fidelity (Phase 3)
+
+struct TopN {
+    std::vector<int32_t> ids;  // [T * n]
+    std::vector<float> lp;     // [T * n]
+};
+
+// Teacher-forced pass over the prompt with logits at every position; keeps the top-n log-probs.
+static TopN forced(llama_context * ctx, const std::vector<llama_token> & toks, int ubatch, int n_vocab, int n) {
+    TopN out;
+    llama_memory_clear(llama_get_memory(ctx), true);
+    llama_batch batch = llama_batch_init(ubatch, 0, 1);
+    std::vector<std::pair<float, int>> sc((size_t) n_vocab);
+    for (int p = 0; p < (int) toks.size(); p += ubatch) {
+        int m = std::min<int>(ubatch, (int) toks.size() - p);
+        batch.n_tokens = m;
+        for (int i = 0; i < m; i++) {
+            batch.token[i] = toks[(size_t) (p + i)]; batch.pos[i] = p + i;
+            batch.n_seq_id[i] = 1; batch.seq_id[i][0] = 0; batch.logits[i] = 1;
+        }
+        if (llama_decode(ctx, batch) != 0) throw std::runtime_error("llama_decode failed");
+        for (int i = 0; i < m; i++) {
+            const float * lg = llama_get_logits_ith(ctx, i);
+            float mx = *std::max_element(lg, lg + n_vocab);
+            double z = 0;
+            for (int v = 0; v < n_vocab; v++) z += std::exp((double) lg[v] - mx);
+            const float lz = mx + (float) std::log(z);
+            for (int v = 0; v < n_vocab; v++) sc[(size_t) v] = {lg[v], v};
+            std::partial_sort(sc.begin(), sc.begin() + n, sc.end(), [](auto & x, auto & y) { return x.first > y.first; });
+            for (int j = 0; j < n; j++) { out.ids.push_back(sc[(size_t) j].second); out.lp.push_back(sc[(size_t) j].first - lz); }
+        }
+    }
+    llama_batch_free(batch);
+    return out;
+}
+
+// KL(ref || cand) over the reference top-n, both renormalised; ids missing from the candidate's
+// top-n get its smallest stored log-prob (same estimator as banach_phase0.fidelity).
+static double topn_kl(const TopN & r, const TopN & c, size_t t, int n) {
+    std::unordered_map<int32_t, float> look;
+    float floor = 0;
+    for (int j = 0; j < n; j++) { look[c.ids[t * n + j]] = c.lp[t * n + j]; floor = std::min(floor, c.lp[t * n + j]); }
+    std::vector<double> rp(n), qp(n);
+    double rz = -INFINITY, qz = -INFINITY;
+    for (int j = 0; j < n; j++) {
+        rp[j] = r.lp[t * n + j];
+        auto it = look.find(r.ids[t * n + j]);
+        qp[j] = it == look.end() ? floor : it->second;
+    }
+    auto lse = [](const std::vector<double> & v) { double m = *std::max_element(v.begin(), v.end()); double s = 0; for (double x : v) s += std::exp(x - m); return m + std::log(s); };
+    rz = lse(rp); qz = lse(qp);
+    double kl = 0;
+    for (int j = 0; j < n; j++) { double a = rp[j] - rz, b = qp[j] - qz; kl += std::exp(a) * (a - b); }
+    return std::min(std::max(kl, 0.0), 10.0);
+}
+
+static std::vector<float> read_eps(const std::string & path, size_t n) {
+    std::vector<float> e;
+    if (path.empty()) return std::vector<float>(n, 1.0f);
+    std::ifstream f(path);
+    if (!f) throw std::runtime_error("cannot read " + path);
+    float v;
+    while (f >> v) e.push_back(v);
+    if (e.size() != n) throw std::runtime_error(path + ": expected " + std::to_string(n) + " values, got " + std::to_string(e.size()));
+    return e;
+}
+
+static int run_fidelity(llama_model * model, llama_model * low, const std::vector<llama_token> & toks, const Args & a,
+                        int n_expert) {
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
+    const int n_layer = llama_model_n_layer(model);
+    const int n = 20;
+    auto eps = read_eps(a.eps_file, (size_t) n_layer * (size_t) n_expert);
+    Engine counter;  // only counts ladder slots
+    LadderCount lc;
+    counter.ladder_count = &lc;
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = (uint32_t) a.ctx; cp.n_batch = (uint32_t) a.ubatch; cp.n_ubatch = (uint32_t) a.ubatch;
+    if (a.threads > 0) { cp.n_threads = a.threads; cp.n_threads_batch = a.threads; }
+    cp.cb_eval = eval_cb; cp.cb_eval_user_data = &counter;
+    llama_context * ctx = llama_init_from_model(model, cp);
+    if (!ctx) throw std::runtime_error("failed to create context");
+    auto t0 = clk::now();
+    TopN ref = forced(ctx, toks, a.ubatch, n_vocab, n);
+    fprintf(stderr, "fidelity: exact reference over %zu tokens in %.1f s\n", toks.size(), secs(t0, clk::now()));
+    if (llama_set_ladder(ctx, low, eps.data(), 0.0f) != 0) throw std::runtime_error("llama_set_ladder failed");
+    printf("[\n");
+    for (size_t ti = 0; ti < a.taus.size(); ti++) {
+        const double tau = a.taus[ti];
+        llama_set_ladder_tau(ctx, (float) tau);
+        lc = LadderCount();
+        auto t1 = clk::now();
+        TopN cand = forced(ctx, toks, a.ubatch, n_vocab, n);
+        const size_t T = toks.size();
+        size_t flips = 0, confident = 0, confident_flips = 0;
+        double kl_sum = 0;
+        std::vector<int> fl(T);
+        for (size_t t = 0; t < T; t++) {
+            fl[t] = ref.ids[t * n] != cand.ids[t * n];
+            flips += (size_t) fl[t];
+            kl_sum += topn_kl(ref, cand, t, n);
+            if (ref.lp[t * n] - ref.lp[t * n + 1] >= a.min_margin) {
+                confident++;
+                confident_flips += (size_t) fl[t];
+            }
+        }
+        const double low_share = lc.slots ? (double) lc.low / (double) lc.slots : 0.0;
+        printf("  {\"tau\": %g, \"tokens\": %zu, \"flips\": %zu, \"flip_rate\": %.6f, \"kl_mean\": %.6f, "
+               "\"min_margin\": %g, \"confident_tokens\": %zu, \"confident_flips\": %zu, \"confident_flip_rate\": %.6f, "
+               "\"low_slot_share\": %.6f, \"seconds\": %.2f}%s\n",
+               tau, T, flips, (double) flips / (double) T, kl_sum / (double) T, a.min_margin, confident, confident_flips,
+               confident ? (double) confident_flips / (double) confident : 0.0, low_share, secs(t1, clk::now()),
+               ti + 1 < a.taus.size() ? "," : "");
+        fflush(stdout);
+        if (!a.flips_out.empty()) {
+            // one line per token: flip (0/1) and the exact model's top-1/top-2 log-prob margin
+            std::ofstream f(a.flips_out + "." + std::to_string(tau) + ".txt");
+            for (size_t t = 0; t < T; t++) f << fl[t] << " " << (ref.lp[t * n] - ref.lp[t * n + 1]) << "\n";
+        }
+    }
+    printf("]\n");
+    llama_free(ctx);
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     Args a = parse(argc, argv);
     try {
@@ -664,6 +823,30 @@ int main(int argc, char ** argv) {
         if (n < 0) throw std::runtime_error("tokenize failed");
         prompt.resize((size_t) n);
         if ((int) prompt.size() + a.n_gen > a.ctx) prompt.resize((size_t) std::max(1, a.ctx - a.n_gen));
+
+        llama_model * low = nullptr;
+        if (!a.ladder.empty()) {
+            low = llama_model_load_from_file(a.ladder.c_str(), mp);
+            if (!low) throw std::runtime_error("failed to load ladder model " + a.ladder);
+        }
+        if (a.fidelity) {
+            if (!low) throw std::runtime_error("--fidelity needs --ladder");
+            char buf[64] = {0};
+            int n_expert = 0;
+            for (int32_t mi = 0; mi < llama_model_meta_count(model); mi++) {
+                char key[256];
+                if (llama_model_meta_key_by_index(model, mi, key, sizeof key) < 0) continue;
+                std::string ks = key;
+                if (ks.size() > 13 && ks.compare(ks.size() - 13, 13, ".expert_count") == 0 &&
+                    llama_model_meta_val_str_by_index(model, mi, buf, sizeof buf) >= 0) { n_expert = atoi(buf); break; }
+            }
+            if (n_expert <= 0) throw std::runtime_error("model has no expert_count");
+            int rc = run_fidelity(model, low, prompt, a, n_expert);
+            llama_model_free(low);
+            llama_model_free(model);
+            llama_backend_free();
+            return rc;
+        }
 
         std::string json = "{";
         RunResult ref;

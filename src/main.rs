@@ -1,5 +1,6 @@
 //! banach: weights-free preflight, hardware probe and planner (Phase 1).
 
+mod fidelity;
 mod gguf;
 mod mckp;
 mod planner;
@@ -25,6 +26,9 @@ usage:
   banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--exact-check]
       plan, then decode with banach-engine using the planned RAM budget for routed experts
       (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
+  banach certify FLIPS [--target P] [--alpha A] [--min-margin M]
+      anytime-valid certificate that the top-1 flip rate is below P (default 0.01), from a
+      banach-engine --flips-out file (columns: flip, exact margin)
   banach calibrate MODEL --measured TOK_S [--label TEXT]
       fit the cost model to one measured decode run of MODEL on this machine
 
@@ -384,6 +388,43 @@ fn cmd_run(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_certify(a: &Args) -> Result<(), String> {
+    let path = a.pos.first().ok_or("certify needs a FLIPS file")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let mut rows = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let mut it = line.split_whitespace();
+        let Some(f) = it.next() else { continue };
+        let flip = match f {
+            "0" => false,
+            "1" => true,
+            _ => return Err(format!("{path}:{}: expected 0 or 1, got {f:?}", i + 1)),
+        };
+        let margin: f64 = it.next().map(|m| m.parse().unwrap_or(f64::INFINITY)).unwrap_or(f64::INFINITY);
+        rows.push((flip, margin));
+    }
+    let target: f64 = num(a, "target", 0.01)?;
+    let alpha: f64 = num(a, "alpha", 0.05)?;
+    let mm = match a.flags.get("min-margin") {
+        Some(v) => Some(v.parse::<f64>().map_err(|_| "bad --min-margin")?),
+        None => None,
+    };
+    let m = fidelity::certify(&rows, target, alpha, mm);
+    let out = serde_json::json!({
+        "tokens": m.tokens,
+        "flips": m.flips,
+        "point_estimate": m.point(),
+        "ucb": m.ucb(),
+        "target": target,
+        "alpha": alpha,
+        "min_margin": mm,
+        "certified": m.certified_at().is_some(),
+        "certified_at_tokens": m.certified_at(),
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = raw.first().cloned() else {
@@ -396,6 +437,7 @@ fn main() -> ExitCode {
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
         "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb"]).and_then(|a| cmd_run(&a)),
+        "certify" => parse_args(rest, &["target", "alpha", "min-margin"]).and_then(|a| cmd_certify(&a)),
         "calibrate" => parse_args(rest, &["ctx", "measured", "label", "usage"]).and_then(|a| cmd_calibrate(&a)),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
