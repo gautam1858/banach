@@ -21,7 +21,7 @@ hardware; dense 405B unusable below 256 GB+.
 R0 skip (low gate mass, never top-1) | R1 2-bit copy in RAM (hot set, ~2× more experts fit) | R2 native
 4-bit in RAM/VRAM (top-ranked + hottest) | R3 native 4-bit streamed from NVMe (lossless floor) |
 R4 network (not yet downloaded, lazy fetch; never on the critical path).
-Policy: escalate per the SPEC-MATH §6 bound; a fidelity budget (e.g. ≥99% of gate mass served at
+Policy: escalate per the SPEC-MATH section 6 bound; a fidelity budget (e.g. ≥99% of gate mass served at
 ≥4-bit, or a certified top-1 bound) adjusts τ automatically. Learning: EMA hotness per workload profile;
 overnight shadow-exact replay reports KL and top-1 agreement on the user's own prompts.
 Format: MXFP4 experts (V4 Flash, Kimi K3) give a free nested ~3.25-bit slice; 2-bit copies must be

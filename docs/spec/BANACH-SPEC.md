@@ -10,7 +10,7 @@ this file > SPEC-DERISK > SPEC-MATH > SPEC-LADDER > SPEC-SYSTEM.
 
 ## 0. Status after de-risking (2 Nov 2026)
 The original headline — DeepSeek V4 Flash at 10+ tok/s, ≤1% top-1 disagreement, 32 GB DDR5,
-one Gen4 NVMe, no GPU — is estimated ~10% likely (SPEC-DERISK §0). Three walls: the always-
+one Gen4 NVMe, no GPU — is estimated ~10% likely (SPEC-DERISK section 0). Three walls: the always-
 active FP8/BF16 path (~6.27 GiB dense + 1.06 GiB head) streams ~7 GB per token and caps
 dual-channel DDR5 near 8–10 tok/s even at 100% hit; only ~18–21 GB is free for experts on a
 32 GB box; published 2–3-bit quants of this family show 5–19% top-1 disagreement.
@@ -76,7 +76,7 @@ it at ~6; Kimi K3 is ~0.05–1 tok/s at best on consumer hardware; dense 405B is
 
 | Machine | DeepSeek V4 Flash | GLM-5.2 | Kimi K3 |
 |---|---|---|---|
-| 32 GB DDR5 + Gen4 NVMe, no GPU | 3–8 tok/s realistic; 10 needs MTP + ≥91% hit (SPEC-DERISK §4) | 1–2 | slow mode |
+| 32 GB DDR5 + Gen4 NVMe, no GPU | 3–8 tok/s realistic; 10 needs MTP + ≥91% hit (SPEC-DERISK section 4) | 1–2 | slow mode |
 | 32 GB + RTX 5080 16 GB, 2× Gen5 | 12–18 | 3–6 | slow mode |
 | M5 Max 64 GB | 15–22 | ~4 | slow mode |
 | 128 GB unified (M5 Max / Strix Halo) | 25+ | 6–10 | ~1 |
@@ -122,8 +122,8 @@ hot experts, where kernels must keep up with DRAM.
   multiple-choice knapsack greedy on convex hulls; bisect λ (RAM) and κ (quality).
 - **Residency**: default to recency eviction (LRU/GreedyDual-Size) with model-informed ADMISSION
   and precision; trillion-scale traces show recency ≈ same-domain oracle frequency and far better
-  off-domain, and router lookahead bought 0.3% (SPEC-DERISK §2). Keep the predicted-GreedyDual +
-  LRU-ghost-cache scheme (SPEC-MATH §3) as an opt-in experiment, not the first build.
+  off-domain, and router lookahead bought 0.3% (SPEC-DERISK section 2). Keep the predicted-GreedyDual +
+  LRU-ghost-cache scheme (SPEC-MATH section 3) as an opt-in experiment, not the first build.
 - **Ladder / skip**: escalate expert i iff `g_i · ε̂_i(b) · ‖x‖ > τ`. Skip a tail set S only
   when `2 · g_S · M < τ` (M = profiled high-percentile expert output norm) and S is cold.
   Never skip top-1. Do NOT hard-code "top-1 always exact": it costs ~0.57 GB/token of forced
@@ -157,7 +157,7 @@ hot experts, where kernels must keep up with DRAM.
 
 ## 8. Phases
 
-**Phase 0 — Feasibility (Python, 2–3 weekends). Hard stop at the end. Full protocol: SPEC-DERISK §6.**
+**Phase 0 — Feasibility (Python, 2–3 weekends). Hard stop at the end. Full protocol: SPEC-DERISK section 6.**
 K1  Kill check: all-resident 2-bit V4 Flash decode on a same-CPU-family ≥128 GB machine; <11 tok/s
     kills the 32 GB CPU-only headline. K2 fio/STREAM constants on the target box.
 0.1 Routing tracer on DeepSeek V4 Flash (expert ids, gate weights, output norms per token
@@ -171,7 +171,7 @@ K1  Kill check: all-resident 2-bit V4 Flash decode on a same-CPU-family ≥128 G
 0.5 `phase0/REPORT.md` with a plain verdict: projected tok/s at ≤1% disagreement on 32 GB,
     and the single biggest risk.
 
-Go/no-go (SPEC-DERISK §6): GO original headline only if K1 ≥ 11 tok/s AND simulated ≥10 tok/s
+Go/no-go (SPEC-DERISK section 6): GO original headline only if K1 ≥ 11 tok/s AND simulated ≥10 tok/s
 with 15% margin on MEASURED free RAM AND the certifying τ's escalation misses fit the I/O budget
 on coding and chat AND cross-workload hot-set transfer ≥ 80% of in-domain. PIVOT to a fallback
 headline if K1 passes but fidelity/capacity fails. STOP CPU-only if K1 fails. Publish the

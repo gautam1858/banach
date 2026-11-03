@@ -19,7 +19,7 @@ Q-Strata EMNLP 2026; AlphaQ 2026 (3.5-bit budget ≈ BF16 on Qwen1.5-MoE; 2.5-bi
 Colla-Q warns frequency-driven allocation overfits calibration domain ⇒ re-estimate p_e on user traffic.
 Working target: ~3.0–3.5 average bits/weight for ≤1% top-1 disagreement, 2-bit only on the cold tail.
 Algorithm: offline Fisher diagonals + σ² per (expert, tensor); online decayed p_e; closed-form b*;
-project onto palette with MCKP greedy (§4); re-solve when ‖Δp‖ exceeds threshold.
+project onto palette with MCKP greedy (section 4); re-solve when ‖Δp‖ exceeds threshold.
 
 ## 2. Weight formats for 2–3-bit experts
 Gaussian bound D(R)=2^(−2R); Lloyd–Max scalar is ~1.9× (2.7 dB) above it at 2 bits. Hadamard/rotation
@@ -62,7 +62,7 @@ prefetch utilization ρ ≲ 0.7; two priority classes, demand pre-empts prefetch
 Autotune ≤6 knobs (λ split, τ, prefetch depth, draft cap, threads, read size) with GP-EI, a few dozen
 trials, seeded by the roofline.
 Note the cost of "top-1 always exact": ~1/6 of 3.4 GB ≈ 0.57 GB/token forced NVMe reads on V4 Flash
-(~80 ms at 7 GB/s). Replace with the §6 bound.
+(~80 ms at 7 GB/s). Replace with the section 6 bound.
 
 ## 5. Speculation under expert streaming
 Expected tokens/pass = (1−α^(γ+1))/(1−α). Expert union for n tokens of top-k/N (independent routing):
@@ -95,7 +95,7 @@ longer than the CS shrink time, anti-windup at palette limits.
 1. Successive refinement (Equitz–Cover): Gaussian/MSE sources are successively refinable, so 2-bit base +
    2-bit residual can reach 4-bit RD performance; SliceMoE's nested failure (PPL 7.0→10.2) reflects naive
    uniform slicing. Store base + separately coded residual; stream only the residual on escalation.
-   Note V4's MXFP4 gives a free nested 3.25-bit slice (SPEC-DERISK §1).
+   Note V4's MXFP4 gives a free nested 3.25-bit slice (SPEC-DERISK section 1).
 2. Lossless entropy coding on the NVMe tier: sources conflict (ZipNN useless on 4-bit vs ISCA 2026
    2–10× below stored bitwidth) — measure on target models.
 3. KV: TurboQuant 3.5 bits quality-neutral; use the outlier-preserving reference scheme. V4 KV negligible.
@@ -103,7 +103,7 @@ longer than the CS shrink time, anti-windup at palette limits.
    expert plus co-activation clustering; Hilbert curves add little.
 
 ## 9. Priorities (payoff per engineering hour) and publishable research
-1. Water-filling + MCKP planner (1–2 weeks). 2. Replace top-1-exact with the §6 rule (days).
+1. Water-filling + MCKP planner (1–2 weeks). 2. Replace top-1-exact with the section 6 rule (days).
 3. Trellis codes for NVMe-streamed copies (reuse ik_llama.cpp). 4. Robust GreedyDual + io_uring tuning
 (1–2 weeks; expect 1.1–1.4× I/O over LRU). 5. Anytime-valid meter + PI loop + speculation toggle (1 week).
 Publishable: Fano/list-decoding bound on expert-cache misses from measured conditional entropy;
