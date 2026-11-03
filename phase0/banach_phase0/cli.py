@@ -105,6 +105,24 @@ def cmd_flips(a: argparse.Namespace) -> None:
         np.savetxt(a.save_flips, flips, fmt="%d")
 
 
+def cmd_usage(a: argparse.Namespace) -> None:
+    """Per-layer expert usage (mean selections per token) for `banach plan --usage`."""
+    t = Trace.load(a.trace)
+    if a.workload:
+        if a.workload not in t.workload_names:
+            raise SystemExit(f"unknown workload {a.workload!r}; have {t.workload_names}")
+        t = t.subset(t.workload == t.workload_names.index(a.workload))
+    counts = np.zeros((t.n_layers, t.n_experts))
+    for l in range(t.n_layers):
+        counts[l] = np.bincount(t.topk[:, l, :].ravel(), minlength=t.n_experts)
+    usage = counts / max(t.n_tokens, 1)
+    out = {"model": t.model, "tokens": int(t.n_tokens), "workloads": t.workload_names if not a.workload else [a.workload],
+           "usage": [[round(float(x), 6) for x in row] for row in usage]}
+    with open(a.out, "w") as f:
+        json.dump(out, f)
+    print(f"wrote {a.out}: {t.n_layers} layers x {t.n_experts} experts from {t.n_tokens} tokens")
+
+
 def cmd_predict(a: argparse.Namespace) -> None:
     model = MODELS[a.model]
     machine = perfmodel.Machine("cli", dram_bw=a.dram_gbs * GB, nvme_bw=a.nvme_gbs * GB,
@@ -170,6 +188,12 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--by-workload", action="store_true")
     s.add_argument("--save-flips", help="write the 0/1 flip sequence to this file")
     s.set_defaults(fn=cmd_flips)
+
+    s = sub.add_parser("usage", help="export per-layer expert usage for `banach plan --usage`")
+    s.add_argument("trace")
+    s.add_argument("--out", required=True)
+    s.add_argument("--workload", help="only this workload")
+    s.set_defaults(fn=cmd_usage)
 
     s = sub.add_parser("predict", help="bandwidth model tok/s (P0.6)")
     s.add_argument("--model", default=DEEPSEEK_V4_FLASH.name, choices=sorted(MODELS))

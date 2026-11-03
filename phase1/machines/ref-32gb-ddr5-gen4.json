@@ -1,0 +1,13 @@
+{
+  "cpu": "reference: 16-core Zen 5, dual-channel DDR5-6000 (SPEC-DERISK section 4)",
+  "cores": 32,
+  "ram_total": 34359738368,
+  "ram_available": 32212254720,
+  "unified_memory": false,
+  "mem_bw": 70000000000.0,
+  "cpu_flops": 3000000000000.0,
+  "disk_bw": 6000000000.0,
+  "disk_measured_direct": true,
+  "gpus": [],
+  "probe_seconds": 0.0
+}

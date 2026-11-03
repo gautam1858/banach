@@ -9,14 +9,32 @@ measuring fidelity against the exact model on your own traffic.
 
 ## Status
 
-Phase 0 (feasibility). The headline target is chosen from the Phase 0 verdict; see
+- Phase 0 (feasibility): tooling complete and validated on a small real MoE. The V4 Flash
+  verdict needs K1/K2 and traces on a machine with 128 GB or more.
+- Phase 1 (probe, preflight, planner, preflight card): working; predicted vs measured
+  within the +-30% bar on held-out data. See [docs/VALIDATION.md](docs/VALIDATION.md).
+
+The headline target is chosen from the Phase 0 verdict; see
 [docs/spec/BANACH-SPEC.md, section 0](docs/spec/BANACH-SPEC.md).
+
+## Quick start
+
+```bash
+cargo build --release
+./target/release/banach probe --disk /path/to/model.gguf
+./target/release/banach plan hf:unsloth/DeepSeek-V4-Flash-GGUF/UD-Q4_K_XL/DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf --min-tok-s 10
+```
+
+`plan` reads only the GGUF headers (a few MB over HTTP range requests), so it answers
+"will it run, how fast, how good" before any weights are downloaded.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `docs/spec/` | Specifications. Precedence: BANACH-SPEC, then SPEC-DERISK, SPEC-MATH, SPEC-LADDER, SPEC-SYSTEM |
+| `src/` | `banach` (Rust): hardware probe, GGUF header parser (local or HTTP range), model profile, planner, preflight card |
+| `phase1/machines/` | reference hardware profiles for planning other machines (`banach plan --hw`) |
 | `tracer/` | `banach-trace`, the llama.cpp routing tracer (Phase 0.1) |
 | `phase0/` | Phase 0 analysis: trace import, cache simulator, entropy floor, ladder sweep, fidelity certificate, decode model, K1/K2 benchmark scripts |
 

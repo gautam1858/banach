@@ -1,0 +1,16 @@
+[package]
+name = "banach"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Run very large MoE models on ordinary machines, with an honest plan and a measured fidelity contract"
+rust-version = "1.75"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["native-certs"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

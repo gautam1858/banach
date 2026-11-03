@@ -1,0 +1,13 @@
+{
+  "cpu": "reference: 16-core Zen 5, 64 GB dual-channel DDR5, RTX 5080 16 GB, 2x Gen5 NVMe",
+  "cores": 32,
+  "ram_total": 68719476736,
+  "ram_available": 66571993088,
+  "unified_memory": false,
+  "mem_bw": 70000000000.0,
+  "cpu_flops": 3000000000000.0,
+  "disk_bw": 22000000000.0,
+  "disk_measured_direct": true,
+  "gpus": [{"name": "NVIDIA GeForce RTX 5080", "vram_bytes": 17179869184, "bandwidth": 960000000000.0}],
+  "probe_seconds": 0.0
+}
