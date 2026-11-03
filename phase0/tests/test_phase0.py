@@ -288,3 +288,69 @@ def test_spearman():
     a = np.arange(10)
     assert ladder.spearman(a, a**2) == pytest.approx(1.0)
     assert ladder.spearman(a, -a) == pytest.approx(-1.0)
+
+
+# ----------------------------------------------------------------- real-trace import
+
+
+def _write_banach_trace(tmp_path, T=7, L=3, k=2, n=4, n_experts=5):
+    import json as _json
+    off = {"token": 0, "pos": 4, "session": 8, "workload": 12, "topk": 16}
+    off["gates"] = (off["topk"] + L * k * 2 + 3) & ~3
+    off["xnorm"] = off["gates"] + L * k * 4
+    off["onorm"] = off["xnorm"] + L * 4
+    off["top_ids"] = off["onorm"] + L * k * 4
+    off["top_logprobs"] = off["top_ids"] + n * 4
+    size = off["top_logprobs"] + n * 4
+    rng = np.random.default_rng(0)
+    buf = bytearray(T * size)
+    topk = np.stack([rng.permutation(n_experts)[:k] for _ in range(T * L)]).reshape(T, L, k)
+    for t in range(T):
+        b = t * size
+        def put(o, arr):
+            raw = np.asarray(arr).tobytes()
+            buf[b + o : b + o + len(raw)] = raw
+        put(off["token"], np.int32(100 + t)); put(off["pos"], np.int32(t))
+        put(off["session"], np.int32(t // 4)); put(off["workload"], np.int32(t // 4))
+        put(off["topk"], topk[t].astype("<i2"))
+        put(off["gates"], np.full((L, k), 0.5, "<f4")); put(off["xnorm"], np.full(L, 2.0, "<f4"))
+        put(off["onorm"], np.full((L, k), 3.0, "<f4"))
+        put(off["top_ids"], np.arange(n, dtype="<i4") + t)
+        put(off["top_logprobs"], np.log(np.full(n, 1 / n, "<f4")))
+    (tmp_path / "r.bin").write_bytes(bytes(buf))
+    meta = {"format": "banach-trace-v1", "n_tokens": T, "moe_layers": list(range(1, L + 1)),
+            "top_k": k, "n_experts": n_experts, "workload_names": ["a", "b"],
+            "record": {"size": size, "ntop": n, **off}}
+    (tmp_path / "r.json").write_text(_json.dumps(meta))
+    return topk
+
+
+def test_import_banach_trace(tmp_path):
+    topk = _write_banach_trace(tmp_path)
+    t = Trace.from_banach_trace(tmp_path / "r.json", hash_layers=(0,))
+    assert np.array_equal(t.topk, topk)
+    assert t.n_experts == 5 and t.hash_layers == (0,)
+    assert t.tokens.tolist() == list(range(100, 107))
+    assert t.session.tolist() == [0, 0, 0, 0, 1, 1, 1]
+    assert np.allclose(t.xnorm, 2.0) and np.allclose(t.onorm, 3.0)
+    assert t.top_ids.shape == (7, 4)
+    t.save(tmp_path / "r.npz")
+    assert np.array_equal(Trace.load(tmp_path / "r.npz").top_ids, t.top_ids)
+
+
+def test_import_rejects_truncated_file(tmp_path):
+    _write_banach_trace(tmp_path)
+    p = tmp_path / "r.bin"
+    p.write_bytes(p.read_bytes()[:-3])
+    with pytest.raises(ValueError):
+        Trace.from_banach_trace(tmp_path / "r.json")
+
+
+def test_compare_top_n():
+    ids = np.array([[1, 2, 3], [4, 5, 6]])
+    lp = np.log(np.array([[0.6, 0.3, 0.1], [0.5, 0.3, 0.2]]))
+    flips, kl = fidelity.compare_top_n(ids, lp, ids, lp)
+    assert flips.tolist() == [0, 0] and np.allclose(kl, 0)
+    cand = np.array([[2, 1, 3], [4, 9, 6]])
+    flips, kl = fidelity.compare_top_n(ids, lp, cand, lp)
+    assert flips.tolist() == [1, 0] and (kl > 0).all()

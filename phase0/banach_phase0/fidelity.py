@@ -138,3 +138,30 @@ def clipped_topk_kl(logp_ref: np.ndarray, logp_q: np.ndarray, k: int = 20, clip:
     q = q - np.logaddexp.reduce(q, axis=1, keepdims=True)
     kl = (np.exp(r) * (r - q)).sum(axis=1)
     return np.clip(kl, 0.0, clip)
+
+
+def compare_top_n(ref_ids: np.ndarray, ref_lp: np.ndarray, cand_ids: np.ndarray, cand_lp: np.ndarray,
+                  clip: float = 10.0) -> tuple[np.ndarray, np.ndarray]:
+    """Top-1 disagreement and clipped top-n KL from two runs' stored top-n distributions.
+
+    Inputs are [T, n] ids and log-probs from the reference (exact) and candidate runs over
+    the same tokens. KL(ref || cand) is taken over the reference's top-n ids; an id missing
+    from the candidate's top-n gets the candidate's smallest stored log-prob, an upper bound
+    on its true log-prob, so the KL estimate errs low for those ids. Both distributions are
+    renormalised over the reference ids before the KL.
+
+    Returns (flips [T] in {0,1}, kl [T]).
+    """
+    if ref_ids.shape != cand_ids.shape:
+        raise ValueError("reference and candidate top-n shapes differ")
+    flips = (ref_ids[:, 0] != cand_ids[:, 0]).astype(float)
+    T, n = ref_ids.shape
+    floor = cand_lp.min(axis=1)
+    q = np.empty_like(ref_lp)
+    for t in range(T):
+        lookup = dict(zip(cand_ids[t].tolist(), cand_lp[t].tolist()))
+        q[t] = [lookup.get(i, floor[t]) for i in ref_ids[t].tolist()]
+    r = ref_lp - np.logaddexp.reduce(ref_lp, axis=1, keepdims=True)
+    q = q - np.logaddexp.reduce(q, axis=1, keepdims=True)
+    kl = np.clip((np.exp(r) * (r - q)).sum(axis=1), 0.0, clip)
+    return flips, kl

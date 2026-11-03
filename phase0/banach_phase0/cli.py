@@ -74,6 +74,37 @@ def cmd_certify(a: argparse.Namespace) -> None:
     print()
 
 
+def cmd_import(a: argparse.Namespace) -> None:
+    hl = tuple(int(x) for x in a.hash_layers.split(",") if x)
+    t = Trace.from_banach_trace(a.trace_json, hl)
+    t.save(a.out)
+    print(f"wrote {a.out}: {t.n_tokens} tokens, {t.n_layers} MoE layers, top-{t.top_k} of {t.n_experts}, "
+          f"workloads {t.workload_names}")
+
+
+def cmd_flips(a: argparse.Namespace) -> None:
+    ref, cand = Trace.load(a.reference), Trace.load(a.candidate)
+    for name, t in (("reference", ref), ("candidate", cand)):
+        if t.top_ids is None:
+            raise SystemExit(f"{name} trace has no stored next-token distribution")
+    if ref.tokens is None or cand.tokens is None or not np.array_equal(ref.tokens, cand.tokens):
+        raise SystemExit("traces are not over the same token sequence")
+    flips, kl = fidelity.compare_top_n(ref.top_ids, ref.top_logprobs, cand.top_ids, cand.top_logprobs)
+    groups = [("all", np.ones(len(flips), bool))]
+    if a.by_workload:
+        groups += [(n, ref.workload == i) for i, n in enumerate(ref.workload_names)]
+    rows = []
+    for name, m in groups:
+        c = fidelity.certify(flips[m], a.p0, a.alpha)
+        rows.append({"group": name, **c.as_dict(),
+                     "kl_mean": round(float(kl[m].mean()), 5),
+                     "kl_p99": round(float(np.quantile(kl[m], 0.99)), 5)})
+    json.dump(rows, sys.stdout, indent=1)
+    print()
+    if a.save_flips:
+        np.savetxt(a.save_flips, flips, fmt="%d")
+
+
 def cmd_predict(a: argparse.Namespace) -> None:
     model = MODELS[a.model]
     machine = perfmodel.Machine("cli", dram_bw=a.dram_gbs * GB, nvme_bw=a.nvme_gbs * GB,
@@ -124,6 +155,21 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--p0", type=float, default=0.01)
     s.add_argument("--alpha", type=float, default=0.05)
     s.set_defaults(fn=cmd_certify)
+
+    s = sub.add_parser("import-trace", help="convert a banach-trace .json/.bin pair to .npz (P0.1)")
+    s.add_argument("trace_json")
+    s.add_argument("--out", required=True)
+    s.add_argument("--hash-layers", default="", help="comma-separated MoE layer indices routed by hash")
+    s.set_defaults(fn=cmd_import)
+
+    s = sub.add_parser("flips", help="top-1 disagreement + KL between two traces, certified (P0.5)")
+    s.add_argument("reference")
+    s.add_argument("candidate")
+    s.add_argument("--p0", type=float, default=0.01)
+    s.add_argument("--alpha", type=float, default=0.05)
+    s.add_argument("--by-workload", action="store_true")
+    s.add_argument("--save-flips", help="write the 0/1 flip sequence to this file")
+    s.set_defaults(fn=cmd_flips)
 
     s = sub.add_parser("predict", help="bandwidth model tok/s (P0.6)")
     s.add_argument("--model", default=DEEPSEEK_V4_FLASH.name, choices=sorted(MODELS))

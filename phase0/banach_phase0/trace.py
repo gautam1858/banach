@@ -36,6 +36,9 @@ class Trace:
     hash_layers: tuple[int, ...] = ()
     workload_names: list[str] = field(default_factory=list)
     onorm: np.ndarray | None = None
+    tokens: np.ndarray | None = None        # [T] input token ids (real traces)
+    top_ids: np.ndarray | None = None       # [T, n] next-token top-n ids
+    top_logprobs: np.ndarray | None = None  # [T, n] their log-probabilities
 
     def __post_init__(self) -> None:
         T, L, k = self.topk.shape
@@ -49,6 +52,12 @@ class Trace:
             raise ValueError("expert id out of range")
         if self.onorm is not None and self.onorm.shape != (T, L, k):
             raise ValueError("onorm shape mismatch")
+        if self.tokens is not None and self.tokens.shape != (T,):
+            raise ValueError("tokens shape mismatch")
+        if (self.top_ids is None) != (self.top_logprobs is None):
+            raise ValueError("top_ids and top_logprobs go together")
+        if self.top_ids is not None and (self.top_ids.shape[0] != T or self.top_ids.shape != self.top_logprobs.shape):
+            raise ValueError("top_ids/top_logprobs shape mismatch")
 
     @property
     def n_tokens(self) -> int:
@@ -74,6 +83,9 @@ class Trace:
             hash_layers=self.hash_layers,
             workload_names=list(self.workload_names),
             onorm=None if self.onorm is None else self.onorm[mask],
+            tokens=None if self.tokens is None else self.tokens[mask],
+            top_ids=None if self.top_ids is None else self.top_ids[mask],
+            top_logprobs=None if self.top_logprobs is None else self.top_logprobs[mask],
         )
 
     def split_by_session(self, warm_frac: float = 0.6) -> tuple[np.ndarray, np.ndarray]:
@@ -109,6 +121,11 @@ class Trace:
         )
         if self.onorm is not None:
             arrays["onorm"] = self.onorm.astype(np.float32)
+        if self.tokens is not None:
+            arrays["tokens"] = self.tokens.astype(np.int32)
+        if self.top_ids is not None:
+            arrays["top_ids"] = self.top_ids.astype(np.int32)
+            arrays["top_logprobs"] = self.top_logprobs.astype(np.float32)
         np.savez_compressed(path, **arrays)
 
     @classmethod
@@ -126,7 +143,58 @@ class Trace:
                 hash_layers=tuple(meta.get("hash_layers", ())),
                 workload_names=list(meta.get("workload_names", [])),
                 onorm=z["onorm"] if "onorm" in z.files else None,
+                tokens=z["tokens"] if "tokens" in z.files else None,
+                top_ids=z["top_ids"] if "top_ids" in z.files else None,
+                top_logprobs=z["top_logprobs"] if "top_logprobs" in z.files else None,
             )
+
+    @classmethod
+    def from_banach_trace(cls, json_path: str | Path, hash_layers: tuple[int, ...] = ()) -> "Trace":
+        """Load the .json/.bin pair written by tracer/banach-trace.
+
+        ``hash_layers`` are indices into the MoE layer list (not llama layer ids).
+        """
+        json_path = Path(json_path)
+        meta = json.loads(json_path.read_text())
+        if meta.get("format") != "banach-trace-v1":
+            raise ValueError(f"unsupported trace format {meta.get('format')!r}")
+        r = meta["record"]
+        L, k, n = len(meta["moe_layers"]), int(meta["top_k"]), int(r["ntop"])
+        n_experts = int(meta.get("n_experts", -1))
+        dt = np.dtype({
+            "names": ["token", "pos", "session", "workload", "topk", "gates", "xnorm", "onorm",
+                      "top_ids", "top_logprobs"],
+            "formats": ["<i4", "<i4", "<i4", "<i4", ("<i2", (L, k)), ("<f4", (L, k)), ("<f4", (L,)),
+                        ("<f4", (L, k)), ("<i4", (n,)), ("<f4", (n,))],
+            "offsets": [r["token"], r["pos"], r["session"], r["workload"], r["topk"], r["gates"],
+                        r["xnorm"], r["onorm"], r["top_ids"], r["top_logprobs"]],
+            "itemsize": r["size"],
+        })
+        bin_path = json_path.with_suffix(".bin")
+        size = bin_path.stat().st_size
+        if size % dt.itemsize:
+            raise ValueError(f"{bin_path} size {size} is not a multiple of the record size {dt.itemsize}")
+        rec = np.fromfile(bin_path, dtype=dt)
+        if len(rec) != int(meta["n_tokens"]):
+            raise ValueError(f"{bin_path}: {len(rec)} records, header says {meta['n_tokens']}")
+        topk = rec["topk"].astype(np.int64)
+        if n_experts <= 0:
+            n_experts = int(topk.max()) + 1
+        return cls(
+            topk=topk,
+            gates=rec["gates"].astype(np.float32),
+            xnorm=rec["xnorm"].astype(np.float32),
+            session=rec["session"].astype(np.int32),
+            workload=rec["workload"].astype(np.int16),
+            n_experts=n_experts,
+            model=meta.get("model_desc", "unknown"),
+            hash_layers=tuple(hash_layers),
+            workload_names=list(meta.get("workload_names", [])),
+            onorm=rec["onorm"].astype(np.float32),
+            tokens=rec["token"].astype(np.int32),
+            top_ids=rec["top_ids"].astype(np.int32) if n else None,
+            top_logprobs=rec["top_logprobs"].astype(np.float32) if n else None,
+        )
 
 
 def synthetic_trace(
