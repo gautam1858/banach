@@ -27,6 +27,64 @@ The held-out point is inside the Phase 1 bar of +-30%. Two findings went into th
 Remaining bias: 2-bit K-quants cost more compute per byte than Q8_0 (+24% on Q2_K). A
 per-type efficiency table is the next refinement.
 
+## Phase 3: precision ladder and fidelity
+
+Same machine. Granite 3.1 1B-A400M, exact = Q8_0, low copy = Q4_K_M / Q3_K_M / Q2_K of
+the same weights (QuantFactory GGUFs), dense path always Q8_0. `banach-engine --fidelity`:
+teacher-forced over a 4,096-token evaluation text (three source files and SPEC-MATH), top-1
+compared with the exact model at every position. eps profiled on real MoE inputs from a
+separate 3,072-token calibration corpus (`banach-trace --dump-x`, `banach_phase0 eps --real`).
+
+Correctness of the patch:
+
+- tau below every bound (all slots exact): 0 flips, KL exactly 0 over 4,096 tokens.
+- exact weights used as the low copy: 0 flips and KL 0 at 0%, 33% and 100% of slots on the
+  second path. The two-path graph is numerically exact; every flip below is a precision effect.
+
+Confident flips count only tokens where the exact model's top-1 beats its top-2 by at least
+0.1 nats (3,899 of 4,096 tokens):
+
+| low copy | rule | tau | slots served low | raw flips | confident flips | KL |
+|---|---|---|---|---|---|---|
+| Q4_K_M | gate only | 1.4 | 0.1% | 2.17% | 0.72% | 0.0021 |
+| Q4_K_M | gate only | 7 | 21.6% | 2.51% | 0.82% | 0.0030 |
+| Q4_K_M | gate only | 14 | 65.7% | 5.05% | 2.95% | 0.0098 |
+| Q4_K_M | gate x eps | 0.05 | 10.7% | 2.93% | 1.13% | 0.0026 |
+| Q4_K_M | gate x eps | 0.1 | 32.8% | 3.54% | 1.64% | 0.0045 |
+| Q4_K_M | all low | - | 100% | 7.10% | 4.90% | 0.0217 |
+| Q3_K_M | gate x eps | 0.05 | 1.8% | 2.47% | 0.80% | 0.0023 |
+| Q3_K_M | gate x eps | 0.1 | 11.3% | 2.86% | 1.10% | 0.0033 |
+| Q3_K_M | all low | - | 100% | 13.09% | 11.03% | 0.0760 |
+| Q2_K | gate x eps (Gaussian eps) | 0.5 | 18.0% | 4.29% | - | 0.0084 |
+| Q2_K | all low | - | 100% | 22.8% | - | 0.285 |
+
+Findings:
+
+1. Raw top-1 agreement cannot be held within 1% of exact on this model by any lossy change.
+   About 3% of the exact model's predictions are near-ties (top-1/top-2 margin below 0.05
+   nats); 0.03% of slots at 4 bits already flips 2.3% of tokens, because the perturbation
+   reaches every later position through the KV cache. Confident flips have a floor of about
+   0.7% for the same reason. The fidelity contract therefore reports raw flips, confident
+   flips and KL, and certifies confident flips.
+2. The gate weight carries most of the signal. With Q4_K_M the gate-only rule beat
+   gate x eps: 21.6% of slots low at 0.82% confident flips, against 10.7% at 1.13%. eps from
+   Gaussian inputs did no better than gate-only on Q2_K either; eps from real inputs helped
+   only at small low shares on Q2_K (about 18% fewer flips at 33% low). The g x eps x norm(x)
+   rule of SPEC-MATH section 6 is not supported by this model; gate-only is the default
+   candidate until a larger model says otherwise.
+3. Uniform 2-bit experts are far outside budget (22.8% raw flips with a Q8_0 dense path,
+   61% when the dense path is also 2-bit: keeping the dense path at native precision matters
+   more than the experts, as non-negotiable 7 says).
+4. Nothing is certified yet. Best setting (Q4_K_M, gate only, tau 7): 0.82% confident flips
+   over 3,899 tokens, betting upper bound 1.11% at alpha 0.05. At a true rate near 0.8% the
+   protocol expects 14k to 25k tokens to certify below 1%; the certificate needs a longer
+   evaluation run, not a looser threshold.
+
+The Rust meter (`banach certify`) reproduces the Python reference certificate exactly on a
+fixed sequence. The PI controller on log tau converges below budget in simulation, but only
+with control windows of thousands of tokens: with 500-token windows the bound can never fall
+under 1% and tau collapses to its floor.
+
 ## Phase 2: streaming engine, measured vs planner
 
 Same machine. `banach-engine` on Granite 3.1 1B-A400M Q8_0 (expert pool 1.28 GB), cold

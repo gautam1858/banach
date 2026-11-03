@@ -54,10 +54,35 @@ bandwidth to unlock here; the gap between naive faulting and whole-expert parall
 expected to be much larger on a Gen4/Gen5 NVMe, which needs deep queues. That still has to
 be measured on such a machine (K2).
 
+## Precision ladder (Phase 3)
+
+`patches/0001-banach-precision-ladder.patch` (179 lines, applies to llama.cpp 9309bf1) adds
+`llama_set_ladder(ctx, low_model, eps, tau)` and `llama_set_ladder_tau(ctx, tau)`. Per
+routed slot the graph computes `gate * eps[layer][expert] * norm(x)` and serves the slot from
+the exact weights when that exceeds tau, otherwise from `low_model`. Every expert mat-mul
+runs twice over disjoint slot sets (an expert id of -1 skips a slot and yields zeros), so
+each slot reads one copy only. tau sits in a tensor, so the controller can move it without a
+graph rebuild. With no ladder installed the graph is the stock graph.
+
+```bash
+cd llama.cpp && git checkout 9309bf1 && git apply ../engine/patches/0001-banach-precision-ladder.patch
+```
+
+Engine options:
+
+- `--ladder LOW.gguf --eps FILE --tau T`: serve with the ladder
+- `--fidelity T1,T2,...`: teacher-forced sweep over the prompt; per tau, raw and confident
+  top-1 flips against exact, clipped top-20 KL and the share of slots served low
+- `--flips-out PREFIX`: per-token flip and exact margin, for `banach certify`
+- `--min-margin M`: margin that makes a token "confident" (default 0.1 nats)
+
+Results and the caveats on the metric are in `docs/VALIDATION.md` (Phase 3).
+
 ## Not yet
 
-- O_DIRECT/io_uring into an engine-owned buffer instead of the page cache (needs the
-  expert-provider patch that also carries the precision ladder, Phase 3).
+- O_DIRECT/io_uring into an engine-owned buffer instead of the page cache.
+- Streaming and the ladder together: the low copy should be the resident tier and exact
+  experts should stream only on escalation. Today the ladder runs with both copies mapped.
 - Lookahead prefetch for layer l+1 during layer l (opt-in experiment per SPEC-MATH section 3).
 - llama.cpp maps the whole file with a full-file WILLNEED prefetch at load; for models
   larger than RAM that load-time read should be disabled (part of the Phase 3 patch).

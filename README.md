@@ -17,6 +17,11 @@ measuring fidelity against the exact model on your own traffic.
   parallel whole-expert fetch, frequency-gated admission and background eviction;
   byte-identical to stock llama.cpp in every tested configuration; 2.1x over naive page
   faulting at the same budget. `banach run` plans the budget and launches it.
+- Phase 3 (precision ladder, fidelity meter): llama.cpp patch serving each routed slot from
+  the exact or a low-bit copy, teacher-forced fidelity sweeps, betting confidence sequences
+  and a tau controller. Numerically exact plumbing; measured trade-offs and the open issues
+  (near-tie floor, gate-only beating the eps bound, certification needs longer runs) are in
+  docs/VALIDATION.md.
 
 The headline target is chosen from the Phase 0 verdict; see
 [docs/spec/BANACH-SPEC.md, section 0](docs/spec/BANACH-SPEC.md).
