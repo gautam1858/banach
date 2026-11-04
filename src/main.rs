@@ -5,6 +5,8 @@ mod gguf;
 mod mckp;
 mod planner;
 mod probe;
+mod pull;
+mod serve;
 mod profile;
 mod source;
 
@@ -26,6 +28,14 @@ usage:
   banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--exact-check]
       plan, then decode with banach-engine using the planned RAM budget for routed experts
       (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
+  banach pull hf:OWNER/REPO/FILE.gguf [--out DIR] [--usage FILE] [--workers N]
+      resumable download: header and dense tensors first, hot experts next (with --usage),
+      SHA-256 checked against the Hugging Face LFS object id
+  banach serve MODEL [--host H] [--port P] [--ctx N] [--budget-mb N] [--lazy]
+               [--ladder LOW.gguf --eps FILE --tau T --target P --min-margin M --period N]
+      OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) compatible server on
+      127.0.0.1:8080; MODEL may be hf:... (downloaded first, or served while downloading
+      with --lazy); with a ladder, shadow replays feed the fidelity meter and tau controller
   banach certify FLIPS [--target P] [--alpha A] [--min-margin M]
       anytime-valid certificate that the top-1 flip rate is below P (default 0.01), from a
       banach-engine --flips-out file (columns: flip, exact margin)
@@ -425,6 +435,120 @@ fn cmd_certify(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn models_dir(a: &Args) -> PathBuf {
+    a.flags.get("out").map(PathBuf::from).unwrap_or_else(|| home().join("models"))
+}
+
+fn read_usage(a: &Args) -> Result<Option<Vec<Vec<f64>>>, String> {
+    match a.flags.get("usage") {
+        None => Ok(None),
+        Some(u) => {
+            let s = std::fs::read_to_string(u).map_err(|e| format!("{u}: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| format!("{u}: {e}"))?;
+            Ok(Some(serde_json::from_value(v["usage"].clone()).map_err(|e| format!("{u}: usage: {e}"))?))
+        }
+    }
+}
+
+fn start_pull(spec: &str, a: &Args) -> Result<std::sync::Arc<pull::Puller>, String> {
+    let usage = read_usage(a)?;
+    let p = pull::Puller::new(spec, &models_dir(a), usage.as_deref())?;
+    let workers: usize = num(a, "workers", 4)?;
+    let handles = p.spawn(workers);
+    // detach the workers; progress is polled
+    std::mem::forget(handles);
+    Ok(p)
+}
+
+fn progress(p: &pull::Puller) {
+    let (have, total) = (p.present_bytes(), p.total_bytes());
+    eprint!("\rdownloaded {:.2} / {:.2} GB ({:.0}%)   ", have as f64 / GB, total as f64 / GB, 100.0 * have as f64 / total.max(1) as f64);
+}
+
+fn wait_for(p: &pull::Puller, cond: impl Fn(&pull::Puller) -> bool) -> Result<(), String> {
+    while !cond(p) {
+        if let Some(e) = p.error() {
+            eprintln!();
+            return Err(e);
+        }
+        progress(p);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    progress(p);
+    eprintln!();
+    Ok(())
+}
+
+fn cmd_pull(a: &Args) -> Result<(), String> {
+    let spec = a.pos.first().ok_or("pull needs hf:OWNER/REPO/FILE.gguf")?;
+    let p = start_pull(spec, a)?;
+    for part in &p.parts {
+        eprintln!("{} -> {} ({:.2} GB, sha256 {})", part.url, part.path.display(), part.size as f64 / GB,
+                  part.sha256.as_deref().unwrap_or("unknown"));
+    }
+    wait_for(&p, |p| p.complete())?;
+    eprintln!("verifying SHA-256 ...");
+    let paths = p.finish()?;
+    for path in paths {
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
+fn cmd_serve(a: &Args) -> Result<(), String> {
+    let spec = a.pos.first().ok_or("serve needs a MODEL")?;
+    let mut lazy = None;
+    let model: PathBuf = if spec.starts_with("hf:") {
+        let p = start_pull(spec, a)?;
+        let first = p.parts[0].path.clone();
+        if a.switches.contains("lazy") {
+            eprintln!("waiting for the header and dense tensors (experts stream in afterwards)");
+            wait_for(&p, |p| p.dense_ready())?;
+            let bg = std::sync::Arc::clone(&p);
+            std::thread::spawn(move || {
+                while !bg.complete() && bg.error().is_none() {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                match bg.finish() {
+                    Ok(_) => eprintln!("download complete and verified"),
+                    Err(e) => eprintln!("download: {e}"),
+                }
+            });
+            lazy = Some(p);
+        } else {
+            wait_for(&p, |p| p.complete())?;
+            p.finish()?;
+        }
+        first
+    } else {
+        let path = PathBuf::from(spec);
+        if !pull::is_complete(&path) {
+            return Err(format!("{spec} is incomplete (a download is unfinished); use the hf: name with --lazy"));
+        }
+        path
+    };
+    let model_id = model.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "model".into());
+    let opts = serve::ServeOptions {
+        engine: engine_path()?,
+        model,
+        model_id,
+        host: a.flags.get("host").cloned().unwrap_or_else(|| "127.0.0.1".into()),
+        port: num(a, "port", 8080)?,
+        ctx: num(a, "ctx", 8192)?,
+        threads: a.flags.get("threads").and_then(|t| t.parse().ok()),
+        budget_mb: a.flags.get("budget-mb").and_then(|b| b.parse().ok()),
+        ladder: a.flags.get("ladder").map(PathBuf::from),
+        eps: a.flags.get("eps").map(PathBuf::from),
+        tau: num(a, "tau", 7.0)?,
+        target: num(a, "target", 0.01)?,
+        min_margin: num(a, "min-margin", 0.1)?,
+        period: num(a, "period", 5000)?,
+        shadow_every: num(a, "shadow-every", 1)?,
+        lazy,
+    };
+    serve::serve(opts)
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = raw.first().cloned() else {
@@ -437,6 +561,10 @@ fn main() -> ExitCode {
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
         "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb"]).and_then(|a| cmd_run(&a)),
+        "pull" => parse_args(rest, &["out", "usage", "workers"]).and_then(|a| cmd_pull(&a)),
+        "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "budget-mb", "ladder", "eps", "tau", "target",
+                                      "min-margin", "period", "shadow-every", "out", "usage", "workers"])
+            .and_then(|a| cmd_serve(&a)),
         "certify" => parse_args(rest, &["target", "alpha", "min-margin"]).and_then(|a| cmd_certify(&a)),
         "calibrate" => parse_args(rest, &["ctx", "measured", "label", "usage"]).and_then(|a| cmd_calibrate(&a)),
         "-h" | "--help" | "help" => {

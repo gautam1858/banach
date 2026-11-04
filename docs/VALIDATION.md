@@ -27,6 +27,32 @@ The held-out point is inside the Phase 1 bar of +-30%. Two findings went into th
 Remaining bias: 2-bit K-quants cost more compute per byte than Q8_0 (+24% on Q2_K). A
 per-type efficiency table is the next refinement.
 
+## Phase 4: serving, APIs, downloads
+
+Same machine. `banach serve` on Granite 3.1 1B-A400M.
+
+- API compatibility: the official OpenAI Python SDK (chat completions, streaming and not)
+  and the official Anthropic Python SDK (messages, streaming and not) ran against the server
+  without changes beyond `base_url`. Stop reasons, usage counts and SSE event order matched
+  what the SDKs expect. Requests with tools get a 400 with a clear message.
+- Prefix cache: a second request sharing 15 of its 16 prompt tokens prefilled in 0.04 s
+  against 2.39 s cold.
+- Stop strings are cut before they are emitted and reported (`stop_sequence` / finish
+  reason); text is only emitted on complete UTF-8 boundaries.
+- Live fidelity loop with the Q4_K_M ladder at tau 7 (gate only): 5 responses, all shadowed
+  on the exact model, 368 confident tokens, 2 flips (0.54%), lifetime upper bound 2.3%: far
+  too few tokens to certify, as expected. With a deliberately short 200-token control window
+  the controller lowered tau from 7 to 5.63; the default window is 5,000 tokens.
+- Lazy start, `banach serve hf:...Q3_K_S.gguf --lazy` (619 MB) over this environment's
+  link (about 1.5 MB/s): serving after 41 s with 106 MB on disk (header and dense tensors);
+  the first answer (correct) completed at 409 s; the full download finished and passed the
+  SHA-256 check against the LFS object id at 415 s. The first prompt needed almost the whole
+  expert pool: with 8 of 32 experts routed per layer, a 20-token prefill touches nearly every
+  expert. Lazy start pays off in proportion to routing sparsity (V4 Flash routes 6 of 256;
+  a 20-token prefill touches about 38% of each layer).
+- `bench/run_bench.sh` on Granite Q8_0, default prompt, 5 runs each: resident decode 20.34
+  tok/s median, 520 MB expert budget 10.41 tok/s median, byte-exact check passed.
+
 ## Phase 3: precision ladder and fidelity
 
 Same machine. Granite 3.1 1B-A400M, exact = Q8_0, low copy = Q4_K_M / Q3_K_M / Q2_K of

@@ -18,4 +18,5 @@ add_subdirectory(${LLAMA_DIR} llama.cpp EXCLUDE_FROM_ALL)
 
 add_executable(banach-trace banach-trace.cpp)
 target_link_libraries(banach-trace PRIVATE llama ggml)
+target_include_directories(banach-trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../engine)
 target_compile_options(banach-trace PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)

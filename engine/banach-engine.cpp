@@ -18,6 +18,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "gguf.h"
+#include "mini_json.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -35,6 +36,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <list>
 #include <map>
 #include <mutex>
@@ -125,6 +127,7 @@ struct Slice {
     const uint8_t * ptr = nullptr;  // in llama.cpp's mapping
     size_t bytes = 0;
     int fd = -1;                    // our own descriptor of the same file
+    int split = 0;                  // which file of a split model
     uint64_t file_off = 0;
 };
 
@@ -178,6 +181,10 @@ struct Engine {
     size_t resident_bytes = 0;
     std::unordered_map<int64_t, double> heat;
     Stats st;
+    // lazy download: experts not yet on disk are requested before use (serve --lazy)
+    bool lazy = false;
+    std::set<int64_t> present;
+    std::function<void(const std::vector<const Slice *> &)> need;
     Pool * pool = nullptr;
     Pool * evictor = nullptr;  // background page-out, off the critical path
     bool pageout = false;      // MADV_PAGEOUT (synchronous reclaim) instead of DONTNEED + fadvise
@@ -197,6 +204,7 @@ struct Engine {
             s.bytes = w->nb[2];
             s.ptr = (const uint8_t *) w->data + (size_t) e * w->nb[2];
             s.fd = fds[(size_t) loc->second.split];
+            s.split = loc->second.split;
             s.file_off = loc->second.file_off + (uint64_t) e * w->nb[2];
             x.bytes += s.bytes;
             x.slices.push_back(s);
@@ -325,6 +333,21 @@ struct Engine {
         transient.clear();
         // per-token usage, so a long prefill counts like one token per expert-use rate
         for (auto & kv : occ) bump(kv.first, (double) kv.second / (double) std::max<int64_t>(1, n_tokens));
+        if (lazy && need) {
+            std::vector<const Slice *> want;
+            std::vector<int64_t> want_keys;
+            for (int64_t key : keys) {
+                if (present.count(key)) continue;
+                Expert * x = expert(il, (int) (key % n_expert));
+                if (!x) continue;
+                for (const Slice & sl : x->slices) want.push_back(&sl);
+                want_keys.push_back(key);
+            }
+            if (!want.empty()) {
+                need(want);  // blocks until the bytes are on disk
+                for (int64_t k : want_keys) present.insert(k);
+            }
+        }
         std::vector<std::function<void()>> jobs;
         for (int64_t key : keys) {
             const int e = (int) (key % n_expert);
@@ -472,6 +495,7 @@ struct Args {
     double min_margin = 0.1;  // confident tokens: exact top-1 beats top-2 by this many nats
     std::vector<double> taus;  // --fidelity sweep
     bool fidelity = false;
+    bool serve = false, lazy = false;
     double half_life = 256;
     int n_gen = 64, threads = 0, io_threads = 8, ctx = 4096, ubatch = 512;
     double budget_mb = 0;
@@ -496,6 +520,8 @@ static void usage() {
         "  --fidelity T1,T2,...      teacher-forced sweep over tau: top-1 flips and KL against exact\n"
         "  --flips-out PREFIX        with --fidelity: write PREFIX.<tau>.txt: per token, flip and exact margin\n"
         "  --min-margin M            confident tokens have an exact top-1/top-2 margin >= M nats (default 0.1)\n"
+        "  --serve                   persistent worker: line-delimited JSON on stdin/stdout (used by banach serve)\n"
+        "  --lazy                    with --serve: the model file is still downloading; ask for missing experts\n"
         "  --warm                    keep whatever is in the page cache (default: start cold)\n"
         "  --heat-in F / --heat-out F  warm-start heat file\n"
         "  --exact-check             also run stock llama.cpp and compare tokens and logits bit for bit\n"
@@ -544,6 +570,8 @@ static Args parse(int argc, char ** argv) {
         }
         else if (s == "--flips-out") a.flips_out = next();
         else if (s == "--min-margin") a.min_margin = std::stod(next());
+        else if (s == "--serve") a.serve = true;
+        else if (s == "--lazy") a.lazy = true;
         else if (s == "--pageout") a.pageout = true;
         else if (s == "--heat-in") a.heat_in = next();
         else if (s == "--heat-out") a.heat_out = next();
@@ -553,7 +581,7 @@ static Args parse(int argc, char ** argv) {
         else if (s == "-h" || s == "--help") { usage(); exit(0); }
         else { fprintf(stderr, "unknown argument %s\n", s.c_str()); usage(); exit(2); }
     }
-    if (a.model.empty() || (a.prompt.empty() && a.prompt_file.empty())) { usage(); exit(2); }
+    if (a.model.empty() || (!a.serve && a.prompt.empty() && a.prompt_file.empty())) { usage(); exit(2); }
     return a;
 }
 
@@ -802,6 +830,391 @@ static int run_fidelity(llama_model * model, llama_model * low, const std::vecto
     return 0;
 }
 
+// Open the model file(s), learn where every tensor lives, discover the expert weight tensors
+// with one short decode, and (with --cold) evict every routed expert. Returns the pool size.
+static size_t setup_engine(Engine & E, llama_model * model, const Args & a, const std::vector<llama_token> & probe,
+                           Pool & evictor) {
+    // file locations of every tensor, for whole-slice reads with our own descriptors
+    auto paths = split_paths(a.model);
+    for (size_t si = 0; si < paths.size(); si++) {
+        int fd = open(paths[si].c_str(), O_RDONLY | O_NOFOLLOW);
+        if (fd < 0) throw std::runtime_error("cannot open " + paths[si]);
+        E.fds.push_back(fd);
+        gguf_init_params gp{true, nullptr};
+        gguf_context * g = gguf_init_from_file(paths[si].c_str(), gp);
+        if (!g) throw std::runtime_error("cannot read GGUF header of " + paths[si]);
+        const uint64_t data = gguf_get_data_offset(g);
+        for (int64_t ti = 0; ti < gguf_get_n_tensors(g); ti++)
+            E.locs[gguf_get_tensor_name(g, ti)] = TensorLoc{(int) si, data + gguf_get_tensor_offset(g, ti)};
+        gguf_free(g);
+    }
+    // discovery: one short decode records the expert weight tensors of every layer
+    {
+        Args d = a; d.n_gen = 1;
+        std::vector<llama_token> one(probe.begin(), probe.begin() + std::min<size_t>(probe.size(), 8));
+        E.discovering = true;
+        run(model, one, d, &E);
+        E.discovering = false;
+        if (E.layer_weights.empty() || E.n_expert == 0) throw std::runtime_error("no routed expert tensors found");
+    }
+    size_t pool_bytes = 0;
+    for (auto & kv : E.layer_weights) {
+        Expert * x = E.expert(kv.first, 0);
+        if (x) pool_bytes += x->bytes * (size_t) E.n_expert;
+    }
+    if (a.cold) E.evict_all();
+    evictor.drain();
+    return pool_bytes;
+}
+
+// ---------------------------------------------------------------- serve (Phase 4)
+//
+// Line-delimited JSON on stdin/stdout, one request at a time; banach serve speaks it.
+//   {"op":"generate","id":"r1","messages":[{"role":"user","content":"hi"}] | "prompt":"...",
+//    "max_tokens":256,"temperature":0.7,"top_p":0.95,"top_k":0,"seed":1,"stop":["\n\n"]}
+//     -> {"id":"r1","event":"token","text":"..","token":123,"argmax":123} per generated token
+//     -> {"id":"r1","event":"done","finish_reason":"stop|length","stop":"..",...usage...}
+//   {"op":"shadow","id":"s1","tokens":[...],"from":k}   exact replay for the fidelity meter
+//     -> {"id":"s1","event":"shadow","argmax":[...],"margin":[...]}  predictions of tokens[k..]
+//   {"op":"set_tau","tau":0.5}   {"op":"stats"}   {"op":"quit"}
+// Lazy mode asks for missing experts with {"event":"need","ranges":[[split,offset,length],...]}
+// and waits for {"op":"have"} before reading them.
+
+static std::string jnum(double v) {
+    if (!std::isfinite(v)) return "null";
+    char b[64];
+    snprintf(b, sizeof b, "%.6g", v);
+    return b;
+}
+
+static void emit(const std::string & line) {
+    fwrite(line.data(), 1, line.size(), stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+}
+
+static void emit_error(const std::string & id, const std::string & msg) {
+    emit("{\"id\":" + mini_json::escape(id) + ",\"event\":\"error\",\"message\":" + mini_json::escape(msg) + "}");
+}
+
+static std::string token_piece(const llama_vocab * vocab, llama_token t) {
+    char buf[256];
+    int n = llama_token_to_piece(vocab, t, buf, sizeof buf, 0, false);
+    if (n < 0) {
+        std::vector<char> big((size_t) -n);
+        n = llama_token_to_piece(vocab, t, big.data(), (int) big.size(), 0, false);
+        return n > 0 ? std::string(big.data(), (size_t) n) : std::string();
+    }
+    return std::string(buf, (size_t) n);
+}
+
+static std::string render_chat(const llama_model * model, const mini_json::Value & msgs) {
+    std::vector<std::string> roles, contents;
+    for (const auto & m : msgs.arr) {
+        const auto * r = m.get("role");
+        const auto * c = m.get("content");
+        if (!r || r->kind != mini_json::Value::STR || !c || c->kind != mini_json::Value::STR)
+            throw std::runtime_error("each message needs a string role and string content");
+        roles.push_back(r->str);
+        contents.push_back(c->str);
+    }
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+    if (!tmpl) throw std::runtime_error("the model has no chat template; send \"prompt\" instead");
+    std::vector<llama_chat_message> cm;
+    size_t total = 0;
+    for (size_t i = 0; i < roles.size(); i++) { cm.push_back({roles[i].c_str(), contents[i].c_str()}); total += contents[i].size(); }
+    std::vector<char> buf(2 * total + 4096);
+    int n = llama_chat_apply_template(tmpl, cm.data(), cm.size(), true, buf.data(), (int) buf.size());
+    if (n < 0) throw std::runtime_error("chat template not supported by llama_chat_apply_template");
+    if ((size_t) n > buf.size()) {
+        buf.resize((size_t) n + 1);
+        n = llama_chat_apply_template(tmpl, cm.data(), cm.size(), true, buf.data(), (int) buf.size());
+    }
+    return std::string(buf.data(), (size_t) n);
+}
+
+struct Topped {
+    int argmax;
+    float margin;  // top-1 minus top-2 log-prob
+};
+
+static Topped top2(const float * lg, int n_vocab) {
+    int a = 0, b = -1;
+    for (int v = 1; v < n_vocab; v++) {
+        if (lg[v] > lg[a]) { b = a; a = v; }
+        else if (b < 0 || lg[v] > lg[b]) b = v;
+    }
+    // margin in log-prob is the logit difference (the normaliser cancels)
+    return {a, b >= 0 ? lg[a] - lg[b] : INFINITY};
+}
+
+static int serve_main(llama_model * model, llama_model * low, const Args & a) {
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    // streaming / lazy engine (optional)
+    std::unique_ptr<Engine> E;
+    std::unique_ptr<Pool> pool, evictor;
+    if (a.budget_mb > 0 || a.lazy) {
+        E = std::make_unique<Engine>();
+        E->mode = Mode::Banach;
+        E->policy = a.policy;
+        E->half_life = a.half_life;
+        E->budget = a.budget_mb > 0 ? (size_t) (a.budget_mb * 1e6) : SIZE_MAX / 2;
+        E->check_residency = false;
+        pool = std::make_unique<Pool>(std::max(1, a.io_threads));
+        evictor = std::make_unique<Pool>(1);
+        E->pool = pool.get();
+        E->evictor = a.async_evict ? evictor.get() : nullptr;
+        if (a.lazy) {
+            E->lazy = true;
+            E->need = [](const std::vector<const Slice *> & want) {
+                std::string line = "{\"event\":\"need\",\"ranges\":[";
+                for (size_t i = 0; i < want.size(); i++) {
+                    line += (i ? "," : "") + std::string("[") + std::to_string(want[i]->split) + "," +
+                            std::to_string(want[i]->file_off) + "," + std::to_string(want[i]->bytes) + "]";
+                }
+                emit(line + "]}");
+                std::string reply;
+                while (std::getline(std::cin, reply)) {
+                    if (reply.find("\"have\"") != std::string::npos) return;
+                    if (reply.find("\"quit\"") != std::string::npos) exit(0);
+                }
+                exit(0);
+            };
+        }
+        std::vector<llama_token> probe = {llama_vocab_bos(vocab) >= 0 ? llama_vocab_bos(vocab) : 0};
+        // discovery must not ask for experts: they are not known yet
+        const bool lz = E->lazy;
+        E->lazy = false;
+        setup_engine(*E, model, a, probe, *evictor);
+        E->lazy = lz;
+    }
+
+    auto make_ctx = [&](bool counted) {
+        llama_context_params cp = llama_context_default_params();
+        cp.n_ctx = (uint32_t) a.ctx;
+        cp.n_batch = (uint32_t) a.ubatch;
+        cp.n_ubatch = (uint32_t) a.ubatch;
+        if (a.threads > 0) { cp.n_threads = a.threads; cp.n_threads_batch = a.threads; }
+        if (E || counted) { cp.cb_eval = eval_cb; cp.cb_eval_user_data = E.get(); }
+        llama_context * c = llama_init_from_model(model, cp);
+        if (!c) throw std::runtime_error("failed to create context");
+        return c;
+    };
+    llama_context * ctx = make_ctx(false);
+    llama_context * shadow = nullptr;
+    double tau = std::isfinite(a.tau) ? a.tau : 0.0;
+    if (low) {
+        const int n_layer = llama_model_n_layer(model);
+        int n_expert = E ? E->n_expert : 0;
+        if (n_expert == 0) {
+            char buf[64];
+            for (int32_t mi = 0; mi < llama_model_meta_count(model); mi++) {
+                char key[256];
+                if (llama_model_meta_key_by_index(model, mi, key, sizeof key) < 0) continue;
+                std::string ks = key;
+                if (ks.size() > 13 && ks.compare(ks.size() - 13, 13, ".expert_count") == 0 &&
+                    llama_model_meta_val_str_by_index(model, mi, buf, sizeof buf) >= 0) { n_expert = atoi(buf); break; }
+            }
+        }
+        auto eps = read_eps(a.eps_file, (size_t) n_layer * (size_t) n_expert);
+        if (llama_set_ladder(ctx, low, eps.data(), (float) tau) != 0) throw std::runtime_error("llama_set_ladder failed");
+        shadow = make_ctx(false);  // exact reference for the meter
+    }
+    llama_memory_t mem = llama_get_memory(ctx);
+    std::vector<llama_token> kv;  // tokens currently in ctx's KV (prefix cache)
+    llama_batch batch = llama_batch_init(a.ubatch, 0, 1);
+
+    auto decode = [&](llama_context * c, const llama_token * t, int n, int pos0, bool all_logits) {
+        for (int p = 0; p < n; p += a.ubatch) {
+            int m = std::min(a.ubatch, n - p);
+            batch.n_tokens = m;
+            for (int i = 0; i < m; i++) {
+                batch.token[i] = t[p + i]; batch.pos[i] = pos0 + p + i;
+                batch.n_seq_id[i] = 1; batch.seq_id[i][0] = 0;
+                batch.logits[i] = all_logits || (p + i == n - 1);
+            }
+            if (llama_decode(c, batch) != 0) throw std::runtime_error("llama_decode failed");
+            if (E && !E->error.empty()) throw std::runtime_error(E->error);
+        }
+    };
+
+    {
+        char desc[256];
+        llama_model_desc(model, desc, sizeof desc);
+        emit(std::string("{\"event\":\"ready\",\"model\":") + mini_json::escape(desc) +
+             ",\"n_ctx\":" + std::to_string(a.ctx) + ",\"n_vocab\":" + std::to_string(n_vocab) +
+             ",\"chat_template\":" + (llama_model_chat_template(model, nullptr) ? "true" : "false") +
+             ",\"ladder\":" + (low ? "true" : "false") + ",\"tau\":" + jnum(tau) +
+             ",\"streaming\":" + (E ? "true" : "false") + ",\"lazy\":" + (a.lazy ? "true" : "false") + "}");
+    }
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+        std::string id;
+        try {
+            mini_json::Value req = mini_json::parse(line);
+            const auto * idv = req.get("id");
+            if (idv && idv->kind == mini_json::Value::STR) id = idv->str;
+            const auto * opv = req.get("op");
+            const std::string op = opv && opv->kind == mini_json::Value::STR ? opv->str : "";
+            auto num = [&](const char * k, double d) {
+                const auto * v = req.get(k);
+                return v && v->kind == mini_json::Value::NUM ? v->num : d;
+            };
+            if (op == "quit") break;
+            if (op == "set_tau") {
+                tau = num("tau", tau);
+                llama_set_ladder_tau(ctx, (float) tau);
+                emit("{\"id\":" + mini_json::escape(id) + ",\"event\":\"ok\",\"tau\":" + jnum(tau) + "}");
+                continue;
+            }
+            if (op == "stats") {
+                std::string o = "{\"id\":" + mini_json::escape(id) + ",\"event\":\"stats\",\"tau\":" + jnum(tau);
+                if (E) {
+                    o += ",\"accesses\":" + std::to_string(E->st.accesses) + ",\"hits\":" + std::to_string(E->st.hits) +
+                         ",\"resident_bytes\":" + std::to_string(E->resident_bytes) +
+                         ",\"fetched_bytes\":" + std::to_string(E->st.fetched_bytes);
+                }
+                emit(o + "}");
+                continue;
+            }
+            if (op == "shadow") {
+                if (!shadow) throw std::runtime_error("shadow needs a ladder (nothing to compare against)");
+                const auto * tv = req.get("tokens");
+                if (!tv || tv->kind != mini_json::Value::ARR) throw std::runtime_error("shadow needs tokens");
+                std::vector<llama_token> toks;
+                for (auto & v : tv->arr) toks.push_back((llama_token) v.num);
+                const int from = (int) num("from", 1);
+                if (from < 1 || from > (int) toks.size()) throw std::runtime_error("bad shadow range");
+                llama_memory_clear(llama_get_memory(shadow), true);
+                std::string am = "[", mg = "[";
+                // predictions for tokens[from..] come from positions from-1 .. n-2
+                decode(shadow, toks.data(), from - 1, 0, false);
+                int pos = from - 1;
+                for (int i = from - 1; i < (int) toks.size() - 1; i++) {
+                    decode(shadow, toks.data() + i, 1, pos++, true);
+                    Topped tp = top2(llama_get_logits_ith(shadow, -1), n_vocab);
+                    am += (i > from - 1 ? "," : "") + std::to_string(tp.argmax);
+                    mg += (i > from - 1 ? "," : "") + jnum(tp.margin);
+                }
+                emit("{\"id\":" + mini_json::escape(id) + ",\"event\":\"shadow\",\"argmax\":" + am + "],\"margin\":" + mg + "]}");
+                continue;
+            }
+            if (op != "generate") throw std::runtime_error("unknown op " + op);
+
+            std::string text;
+            bool templated = false;
+            if (const auto * mv = req.get("messages"); mv && mv->kind == mini_json::Value::ARR) {
+                text = render_chat(model, *mv);
+                templated = true;
+            } else if (const auto * pv = req.get("prompt"); pv && pv->kind == mini_json::Value::STR) {
+                text = pv->str;
+            } else {
+                throw std::runtime_error("generate needs messages or prompt");
+            }
+            (void) templated;
+            int nt = -llama_tokenize(vocab, text.data(), (int) text.size(), nullptr, 0, true, true);
+            std::vector<llama_token> toks((size_t) std::max(nt, 0));
+            if (nt <= 0 || llama_tokenize(vocab, text.data(), (int) text.size(), toks.data(), nt, true, true) < 0)
+                throw std::runtime_error("tokenization failed");
+            const int max_tokens = (int) num("max_tokens", 256);
+            if ((int) toks.size() + max_tokens > a.ctx)
+                throw std::runtime_error("prompt of " + std::to_string(toks.size()) + " tokens plus max_tokens " +
+                                         std::to_string(max_tokens) + " exceeds the context of " + std::to_string(a.ctx));
+            std::vector<std::string> stops;
+            if (const auto * sv = req.get("stop")) {
+                if (sv->kind == mini_json::Value::STR) stops.push_back(sv->str);
+                else if (sv->kind == mini_json::Value::ARR) for (auto & x : sv->arr) if (x.kind == mini_json::Value::STR && !x.str.empty()) stops.push_back(x.str);
+            }
+            size_t hold = 0;
+            for (auto & st : stops) hold = std::max(hold, st.size() - 1);
+
+            // prefix cache: keep the longest shared prefix of the KV, decode the rest
+            size_t keep = 0;
+            while (keep < kv.size() && keep < toks.size() - 1 && kv[keep] == toks[keep]) keep++;
+            if (!llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1)) { llama_memory_clear(mem, true); keep = 0; }
+            kv.resize(keep);
+            auto t0 = clk::now();
+            decode(ctx, toks.data() + keep, (int) (toks.size() - keep), (int) keep, false);
+            kv.insert(kv.end(), toks.begin() + keep, toks.end());
+            auto t1 = clk::now();
+
+            llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+            const double temp = num("temperature", 0.0);
+            if (temp <= 0) {
+                llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+            } else {
+                const int top_k = (int) num("top_k", 0);
+                if (top_k > 0) llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
+                const double top_p = num("top_p", 1.0);
+                if (top_p < 1.0) llama_sampler_chain_add(smpl, llama_sampler_init_top_p((float) top_p, 1));
+                llama_sampler_chain_add(smpl, llama_sampler_init_temp((float) temp));
+                llama_sampler_chain_add(smpl, llama_sampler_init_dist((uint32_t) num("seed", 4294967295.0)));
+            }
+            std::string out;
+            size_t emitted = 0;
+            std::string finish = "length", stop_hit;
+            int n_gen = 0;
+            std::vector<llama_token> gen;
+            const std::string idj = mini_json::escape(id);
+            while (n_gen < max_tokens) {
+                const float * lg = llama_get_logits_ith(ctx, -1);
+                const int amax = top2(lg, n_vocab).argmax;
+                llama_token t = llama_sampler_sample(smpl, ctx, -1);
+                if (llama_vocab_is_eog(vocab, t)) { finish = "stop"; break; }
+                gen.push_back(t);
+                n_gen++;
+                out += token_piece(vocab, t);
+                size_t cut = std::string::npos;
+                for (auto & st : stops) {
+                    size_t f = out.find(st, emitted > st.size() ? emitted - st.size() : 0);
+                    if (f != std::string::npos && f < cut) { cut = f; stop_hit = st; }
+                }
+                size_t upto;
+                if (cut != std::string::npos) upto = cut;
+                else upto = out.size() > hold ? out.size() - hold : 0;
+                if (upto < emitted) upto = emitted;
+                std::string chunk = out.substr(emitted, upto - emitted);
+                chunk.resize(mini_json::utf8_complete_prefix(chunk));
+                emitted += chunk.size();
+                emit("{\"id\":" + idj + ",\"event\":\"token\",\"text\":" + mini_json::escape(chunk) +
+                     ",\"token\":" + std::to_string(t) + ",\"argmax\":" + std::to_string(amax) + "}");
+                if (cut != std::string::npos) { finish = "stop"; break; }
+                if (n_gen >= max_tokens) break;
+                decode(ctx, &t, 1, (int) kv.size(), false);
+                kv.push_back(t);
+            }
+            llama_sampler_free(smpl);
+            if (stop_hit.empty() && emitted < out.size()) {
+                // flush what the stop-string hold-back kept
+                emit("{\"id\":" + idj + ",\"event\":\"token\",\"text\":" + mini_json::escape(out.substr(emitted)) +
+                     ",\"token\":-1,\"argmax\":-1}");
+            }
+            auto t2 = clk::now();
+            std::string all = "[";
+            for (size_t i = 0; i < toks.size(); i++) all += (i ? "," : "") + std::to_string(toks[i]);
+            for (llama_token t : gen) all += "," + std::to_string(t);
+            all += "]";
+            const double dec = secs(t1, t2);
+            emit("{\"id\":" + idj + ",\"event\":\"done\",\"finish_reason\":\"" + finish + "\",\"stop\":" +
+                 (stop_hit.empty() ? std::string("null") : mini_json::escape(stop_hit)) +
+                 ",\"prompt_tokens\":" + std::to_string(toks.size()) + ",\"cached_tokens\":" + std::to_string(keep) +
+                 ",\"completion_tokens\":" + std::to_string(n_gen) + ",\"prefill_seconds\":" + jnum(secs(t0, t1)) +
+                 ",\"decode_seconds\":" + jnum(dec) + ",\"tok_s\":" + jnum(dec > 0 ? n_gen / dec : 0) +
+                 ",\"tokens\":" + all + ",\"n_prompt\":" + std::to_string(toks.size()) + "}");
+        } catch (std::exception & e) {
+            emit_error(id, e.what());
+        }
+    }
+    llama_batch_free(batch);
+    if (shadow) llama_free(shadow);
+    llama_free(ctx);
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     Args a = parse(argc, argv);
     try {
@@ -816,6 +1229,18 @@ int main(int argc, char ** argv) {
         mp.load_mode = LLAMA_LOAD_MODE_MMAP;
         llama_model * model = llama_model_load_from_file(a.model.c_str(), mp);
         if (!model) throw std::runtime_error("failed to load " + a.model);
+        if (a.serve) {
+            llama_model * low = nullptr;
+            if (!a.ladder.empty()) {
+                low = llama_model_load_from_file(a.ladder.c_str(), mp);
+                if (!low) throw std::runtime_error("failed to load ladder model " + a.ladder);
+            }
+            int rc = serve_main(model, low, a);
+            if (low) llama_model_free(low);
+            llama_model_free(model);
+            llama_backend_free();
+            return rc;
+        }
         const llama_vocab * vocab = llama_model_get_vocab(model);
         int n = -llama_tokenize(vocab, text.data(), (int) text.size(), nullptr, 0, true, true);
         std::vector<llama_token> prompt((size_t) n);
@@ -869,36 +1294,7 @@ int main(int argc, char ** argv) {
             Pool evictor(1);
             E.evictor = a.async_evict ? &evictor : nullptr;
             E.pageout = a.pageout;
-            // file locations of every tensor, for whole-slice reads with our own descriptors
-            auto paths = split_paths(a.model);
-            for (size_t si = 0; si < paths.size(); si++) {
-                int fd = open(paths[si].c_str(), O_RDONLY | O_NOFOLLOW);
-                if (fd < 0) throw std::runtime_error("cannot open " + paths[si]);
-                E.fds.push_back(fd);
-                gguf_init_params gp{true, nullptr};
-                gguf_context * g = gguf_init_from_file(paths[si].c_str(), gp);
-                if (!g) throw std::runtime_error("cannot read GGUF header of " + paths[si]);
-                const uint64_t data = gguf_get_data_offset(g);
-                for (int64_t ti = 0; ti < gguf_get_n_tensors(g); ti++)
-                    E.locs[gguf_get_tensor_name(g, ti)] = TensorLoc{(int) si, data + gguf_get_tensor_offset(g, ti)};
-                gguf_free(g);
-            }
-            // discovery: one short decode records the expert weight tensors of every layer
-            {
-                Args d = a; d.n_gen = 1;
-                std::vector<llama_token> one(prompt.begin(), prompt.begin() + std::min<size_t>(prompt.size(), 8));
-                E.discovering = true;
-                run(model, one, d, &E);
-                E.discovering = false;
-                if (E.layer_weights.empty() || E.n_expert == 0) throw std::runtime_error("no routed expert tensors found");
-            }
-            size_t pool_bytes = 0;
-            for (auto & kv : E.layer_weights) {
-                Expert * x = E.expert(kv.first, 0);
-                if (x) pool_bytes += x->bytes * (size_t) E.n_expert;
-            }
-            if (a.cold) E.evict_all();
-            evictor.drain();
+            size_t pool_bytes = setup_engine(E, model, a, prompt, evictor);
             size_t warmed = 0;
             if (!a.heat_in.empty()) {
                 std::ifstream f(a.heat_in);
