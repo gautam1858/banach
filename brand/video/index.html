@@ -486,7 +486,7 @@ function sceneReveal(t) {                     // 38.4 - 44
   const t1 = easeOut(span(t, 39.9, 40.7)), t2 = easeOut(span(t, 40.5, 41.3)), t3 = easeOut(span(t, 41.1, 41.9));
   text('More model than your machine should hold.', tx, wy + (PORTRAIT ? 150 : 140) * U, PORTRAIT ? 40 : 42, { align: al, color: INK, weight: 500, alpha: t1 });
   text('Predict.  Stream.  Prove.', tx, wy + (PORTRAIT ? 225 : 210) * U, PORTRAIT ? 36 : 36, { align: al, color: CYAN, weight: 600, alpha: t2, spacing: 2 });
-  text('open source  ·  github.com/gautam1858/banach', tx, wy + (PORTRAIT ? 300 : 280) * U, PORTRAIT ? 28 : 28, { align: al, color: MUTED, weight: 400, alpha: t3 });
+  text('open source  |  github.com/gautam1858/banach', tx, wy + (PORTRAIT ? 300 : 280) * U, PORTRAIT ? 28 : 28, { align: al, color: MUTED, weight: 400, alpha: t3 });
   g.restore();
 }
 
