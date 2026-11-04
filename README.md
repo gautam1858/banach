@@ -83,9 +83,27 @@ docker run --rm -p 8080:8080 -v banach:/data ghcr.io/gautam1858/banach --help
 cargo install banach
 ```
 
-Prebuilt binaries: Linux x86_64 (AVX2 or newer), Linux arm64, macOS on Apple Silicon
-(experimental). `cargo install` builds the planner, downloader and server; the inference
-engine comes with the other channels or [from source](#build-from-source).
+Prebuilt binaries: Linux x86_64 (AVX2 or newer), Linux arm64, macOS on Apple Silicon.
+`cargo install` builds the planner, downloader and server; the inference engine comes with
+the other channels or [from source](#build-from-source).
+
+### Hardware
+
+Every row below is built by CI on each commit; "byte-exact" means the streaming engine is
+checked token for token and logit for logit against stock llama.cpp on that platform.
+
+| Platform | Engine | Expert streaming | CI |
+|---|---|---|---|
+| Linux x86_64 | CPU (AVX2, AVX-512) | full: `readahead`, `MADV_POPULATE_READ`, hard RAM budget, `mincore` checks | built, byte-exact |
+| Linux arm64 | CPU (NEON) | full | built, byte-exact |
+| macOS, Apple Silicon | CPU, Metal | prefetch and touch; the budget is soft (the kernel may keep evicted pages) | built, byte-exact |
+| Windows x86_64 | CPU | `PrefetchVirtualMemory`; soft budget by working-set trim; no residency checks | built, byte-exact |
+| NVIDIA GPUs | CUDA | dense layers and KV on the GPU (`--gpu-layers`), routed experts streamed from RAM | built (no GPU in CI) |
+| AMD, Intel, NVIDIA GPUs | Vulkan | as CUDA | built (no GPU in CI) |
+
+Measured speed numbers so far are from Linux x86_64; numbers for the other rows will be
+added to docs/VALIDATION.md as they are run. GPU builds come from source: add
+`-DGGML_CUDA=ON`, `-DGGML_VULKAN=ON` or (on macOS, on by default) Metal to the cmake line.
 
 ## 60-second start
 
@@ -156,7 +174,10 @@ export BANACH_ENGINE=$PWD/build-engine/banach-engine
 ```
 
 A source build tunes the engine for your CPU (`-march=native`), which is faster than the
-portable prebuilt binaries.
+portable prebuilt binaries. For a GPU, add `-DGGML_CUDA=ON` or `-DGGML_VULKAN=ON` to the
+cmake line and run with `--gpu-layers 99`: dense layers go to the GPU, routed experts stay in
+RAM under the streamer. On Windows, run the same steps from a Visual Studio developer
+prompt; the binary is `build-engine\banach-engine.exe`.
 
 ## Commands
 
@@ -166,7 +187,7 @@ portable prebuilt binaries.
 | `banach inspect MODEL` | model profile from headers: experts, bytes per token, KV per token |
 | `banach plan MODEL` | preflight card; `--hw FILE` plans for another machine, `--usage FILE` uses a routing trace |
 | `banach pull hf:...` | resumable, prioritised, verified download |
-| `banach run MODEL -f PROMPT` | plans the expert budget and runs one generation |
+| `banach run MODEL -f PROMPT` | plans the expert budget and runs one generation; `--gpu-layers N` offloads dense layers |
 | `banach serve MODEL` | local OpenAI/Anthropic compatible server |
 | `banach certify FLIPS` | anytime-valid certificate on a recorded flip sequence |
 | `banach calibrate MODEL --measured TOK_S` | fits the cost model to one measured run |
@@ -179,8 +200,8 @@ portable prebuilt binaries.
   a model uses tools is up to the model: small models (1 to 3B) call simple tools reliably
   but are weak agents.
 - One request at a time; concurrent requests queue.
-- Linux only for streaming and lazy mode (`readahead`, `MADV_POPULATE_READ`); macOS needs
-  another fetch path.
+- The hard RAM budget and lazy mode are fastest on Linux; macOS and Windows keep the same
+  output but their budget is soft (see Hardware).
 - The ladder and expert streaming do not yet run together (the low copy should be the
   resident tier with exact experts streamed on escalation).
 - Lazy start only helps as much as the first prompt is sparse: a prefill touches a large
