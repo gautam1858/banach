@@ -13,6 +13,10 @@
   <a href="docs/VALIDATION.md">Every measured number</a>
 </p>
 
+<p align="center">
+  <a href="https://buymeacoffee.com/gautam1858"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-support%20Banach-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee" height="36"></a>
+</p>
+
 # Banach
 
 **Run Mixture-of-Experts models bigger than your RAM, and know what it will cost before you
@@ -237,6 +241,13 @@ Banach builds on other people's work and says so:
 - Unsloth and AtomicChat: published fidelity tables for DeepSeek V4 quants.
 - Research: Si et al. and Liang et al. on expert locality; SliceMoE, DyMoE and HOBBIT on
   mixed-precision experts; Waudby-Smith and Ramdas on betting confidence sequences.
+
+## Support
+
+Banach is free and open source. If it saves you time or a hardware upgrade, you can help pay
+for test machines and CI:
+
+<a href="https://buymeacoffee.com/gautam1858"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
 
 ## License
 
