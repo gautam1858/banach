@@ -97,7 +97,7 @@ jobs:
             flags: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86
           - name: vulkan
             container: ubuntu:24.04
-            deps: cmake ninja-build git g++ libvulkan-dev glslc
+            deps: cmake ninja-build git g++ libvulkan-dev glslc spirv-headers
             flags: -DGGML_VULKAN=ON
     name: engine (${{ matrix.name }})
     runs-on: ubuntu-latest
