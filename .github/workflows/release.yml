@@ -120,6 +120,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # only the build outputs (the Docker job also leaves a build record artifact)
+          pattern: build-*
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
@@ -140,6 +142,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # only the build outputs (the Docker job also leaves a build record artifact)
+          pattern: build-*
       - run: mkdir -p wheels && cp artifacts/*/wheels/*.whl wheels/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -160,6 +164,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          # only the build outputs (the Docker job also leaves a build record artifact)
+          pattern: build-*
       - name: platform packages, then the launcher
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
