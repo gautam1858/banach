@@ -38,6 +38,22 @@ banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode M
   machine the process was killed for running out of memory at 13.9 GB resident. The engine
   now turns repacking off (`--no-repack` in llama.cpp terms).
 
+## Planner table in the README ("Which model on my machine?")
+
+`banach plan MODEL --hw PROFILE`, commit after c3daa34, Exact plan (lossless weights), default
+target 5 tok/s and ctx 8192. Profiles: the 16 GB VM measured by `banach probe` (above),
+phase1/machines/ref-32gb-ddr5-gen4.json and phase1/machines/ref-64gb-rtx5080.json. Models are
+the first shard of each unsloth GGUF on Hugging Face; only headers are read.
+
+| Model | 16 GB VM | ref 32 GB | ref 64 GB + RTX 5080 |
+|---|---|---|---|
+| Kimi-K2-Instruct UD-Q2_K_XL (381.9 GB) | 0.20 (0.16 to 0.25) | 1.04 (0.84 to 1.26) | 3.56 (3.00 to 4.12) |
+| DeepSeek-V4-Flash UD-Q4_K_XL (155.1 GB) | 0.44 (0.35 to 0.53) | 2.20 (1.82 to 2.60) | 10.02 (8.64 to 11.35) |
+| Qwen3-235B-A22B-Instruct-2507 UD-Q2_K_XL (88.8 GB) | 0.33 (0.26 to 0.39) | 1.73 (1.44 to 2.03) | 7.20 (6.57 to 7.78) |
+| gpt-oss-120b F16 (65.4 GB) | 0.98 (0.80 to 1.17) | 4.93 (4.18 to 5.66) | 24.15 (22.12 to 26.10) |
+| GLM-4.5-Air UD-Q2_K_XL (47.4 GB) | 0.55 (0.46 to 0.64) | 2.77 (2.42 to 3.10) | 14.89 (13.73 to 15.98) |
+| Qwen3.6-35B-A3B UD-Q4_K_M (22.1 GB) | 2.11 (1.87 to 2.35); measured 5.40 | 8.76 (7.98 to 9.52) | 80.60 (73.62 to 87.38) |
+
 ## Phase 1: planner predicted vs measured
 
 Machine: cloud VM, Intel Xeon @ 2.80 GHz, 4 threads, AVX-512, 16.9 GB RAM.

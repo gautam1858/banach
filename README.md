@@ -4,91 +4,122 @@
 
 <h1 align="center">Banach</h1>
 
+<h3 align="center">A trillion parameters on the computer you already own.</h3>
+
 <p align="center">
-  <b>Run AI models bigger than your RAM. Faster than llama.cpp. Byte-for-byte the same answers.</b>
+  Run Mixture-of-Experts models <b>bigger than your RAM</b>, faster than llama.cpp,<br>
+  with <b>byte-for-byte the same answers</b>. Know the speed <b>before</b> you download a single weight.
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/banach/"><img src="https://img.shields.io/pypi/v/banach?style=flat-square&color=3775A9&label=pip%20install%20banach" alt="PyPI"></a>
-  <a href="https://github.com/gautam1858/banach/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/gautam1858/banach/ci.yml?branch=main&style=flat-square&label=byte-exact%20CI" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"></a>
-  <a href="https://buymeacoffee.com/gautam1858"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
+  <a href="https://pypi.org/project/banach/"><img src="https://img.shields.io/pypi/v/banach?style=for-the-badge&color=3775A9&label=pip%20install%20banach" alt="PyPI"></a>
+  <a href="https://github.com/gautam1858/banach/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/gautam1858/banach/ci.yml?branch=main&style=for-the-badge&label=byte-exact%20CI" alt="CI"></a>
+  <a href="https://github.com/gautam1858/banach/stargazers"><img src="https://img.shields.io/github/stars/gautam1858/banach?style=for-the-badge&color=f5c518" alt="Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-2ea44f?style=for-the-badge" alt="License"></a>
 </p>
 
 <p align="center">
-  <a href="brand/video/banach-launch-16x9.mp4">Watch the film</a> &nbsp;|&nbsp;
-  <a href="#install">Install</a> &nbsp;|&nbsp;
-  <a href="#60-second-start">60-second start</a> &nbsp;|&nbsp;
-  <a href="docs/VALIDATION.md">Benchmarks</a>
+  <a href="brand/video/banach-launch-16x9.mp4"><b>Watch the film</b></a> &nbsp;&middot;&nbsp;
+  <a href="#get-started-in-one-line"><b>Get started</b></a> &nbsp;&middot;&nbsp;
+  <a href="#which-model-on-my-machine"><b>Which model on my machine?</b></a> &nbsp;&middot;&nbsp;
+  <a href="docs/VALIDATION.md"><b>Every number</b></a>
 </p>
 
 ---
 
-## A 22 GB model on a 16 GB machine
+```console
+$ pip install banach
 
-Qwen3.6-35B-A3B (Q4_K_M, 22.1 GB) on a 4-core cloud VM with 16 GB of RAM, no swap and a
-1.27 GB/s disk. Cold start, same prompt, same greedy decode.
+# one trillion parameters, a 64 GB desktop with one gaming GPU: ask first, it reads 16 MB
+$ banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf --hw phase1/machines/ref-64gb-rtx5080.json
+| Kimi-K2-Instruct  (deepseek2)                                          |
+| 381.9 GB on disk, 384 experts x 60 layers, top-8                       |
+| Exact                3.56 tok/s  (range 3.00 to 4.12)                  |
+
+# a 22 GB model on a 16 GB machine, from a cold start
+$ banach-engine -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -f story.txt -n 256 --budget-mb 10000
+banach: prefill 18 tok 3.44 s; decode 256 tok 5.40 tok/s, hit 95.7% (page cache 95.7%)
+
+# and the answers are the exact ones
+$ banach-engine -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -f story.txt -n 64 --budget-mb 10000 --exact-check
+exact-check: PASS byte-identical (64 tokens, logits bit-equal at every step)
+```
+
+<p align="center">
+  <a href="https://buymeacoffee.com/gautam1858"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="44"></a>
+  <br><sub>Every coffee goes into test hardware for the trillion-parameter runs. A star helps just as much.</sub>
+</p>
+
+## The numbers
+
+**A 22 GB model on a 16 GB machine.** Qwen3.6-35B-A3B (Q4_K_M) on a 4-core cloud VM with no
+swap and a 1.27 GB/s disk. Cold start, same prompt, same greedy decode.
 
 | | stock llama.cpp | **Banach** | |
 |---|---:|---:|---|
 | Default settings | **crashed: out of memory** | **runs** | llama.cpp copies the weights into RAM; Banach streams them |
-| Model size vs RAM | | **138%** | 22.1 GB of model, 16 GB of RAM, no swap |
+| Model size vs RAM | | **138%** | 22.1 GB of model, 16 GB of RAM |
 | Prompt processing | 7.64 s | **3.44 s** | **2.2x faster** |
-| Generation | 4.89 tok/s | **5.40 tok/s** | **+10%**, on a 4-core VM |
+| Generation | 4.89 tok/s | **5.40 tok/s** | **+10%** |
 | RAM for experts | all it can take | **10 GB, capped** | the rest of your machine stays usable |
 | Output | reference | **identical** | every token, every logit, bit for bit |
 | Read before you know the speed | the whole 22 GB | **16 MB** | `banach plan` reads 0.07% of the file |
 
-The stock llama.cpp speed rows are with weight repacking turned off, the only way it runs here.
+Squeeze the RAM budget further and race llama.cpp paging experts in at that same budget:
+**2.1x faster generation**. The stock llama.cpp speed rows run with weight repacking off, the
+only way it runs here. Machine, commit and command for every number:
+[docs/VALIDATION.md](docs/VALIDATION.md).
 
-Squeeze the RAM budget further and race llama.cpp paging experts in at that same budget: **2.1x faster generation** ([details](docs/VALIDATION.md)).
+**No approximations. No re-quantizing. No quality loss.** The exact weights stay on disk.
+Banach just moves them better.
 
-No approximations, no re-quantizing, no quality loss. The exact weights stay on disk; Banach
-just moves them better.
+## Which model on my machine?
 
-## How
+What `banach plan` says, from headers alone, for the biggest open models on three machines.
+The planner is deliberately conservative: on the 22 GB run above it said **2.1 tok/s**, and
+the measured speed was **5.4 tok/s**.
 
-A Mixture-of-Experts model only uses a few of its experts per token. When the file does not
-fit in memory, plain llama.cpp leaves it to the operating system, which pages bytes in 4 KB at
-a time with no idea which experts come next. Banach knows the model:
+| Model | Parameters | On disk | 16 GB, 4 cores<br><sub>1.3 GB/s disk</sub> | 32 GB desktop<br><sub>DDR5, Gen4 NVMe, no GPU</sub> | 64 GB + RTX 5080<br><sub>2x Gen5 NVMe</sub> |
+|---|---:|---:|---:|---:|---:|
+| **Kimi K2** (UD-Q2_K_XL) | **1 trillion** | 382 GB | 0.2 tok/s | 1.0 tok/s | **3.6 tok/s** |
+| **DeepSeek V4 Flash** (UD-Q4_K_XL) | 284 B | 155 GB | 0.4 tok/s | 2.2 tok/s | **10.0 tok/s** |
+| **Qwen3 235B-A22B** (UD-Q2_K_XL) | 235 B | 89 GB | 0.3 tok/s | 1.7 tok/s | **7.2 tok/s** |
+| **gpt-oss-120b** (F16) | 117 B | 65 GB | 1.0 tok/s | 4.9 tok/s | **24.2 tok/s** |
+| **GLM-4.5-Air** (UD-Q2_K_XL) | 106 B | 47 GB | 0.6 tok/s | 2.8 tok/s | **14.9 tok/s** |
+| **Qwen3.6-35B-A3B** (UD-Q4_K_M) | 35 B | 22 GB | **5.4 tok/s measured** | 8.8 tok/s | **80.6 tok/s** |
 
-- **It plans before you download.** `banach plan hf:...` reads a few MB of headers and tells
-  you the speed to expect on your machine and how the model splits across GPU, RAM and disk.
-- **It streams experts on purpose.** Whole experts, fetched in parallel the moment the
-  router picks them, held in a RAM budget you choose, with the most-used experts kept hot.
-- **It proves it.** Every configuration is checked against stock llama.cpp token for token.
-  Optional faster low-precision experts come with a live fidelity meter, so a shortcut is
-  never silent.
+Exact weights in every cell, no lossy shortcuts. Ask about your own machine in ten seconds:
 
-The name comes from the Banach-Tarski paradox: one ball, cut into pieces and reassembled,
-becomes two. More model than your machine should hold.
+```bash
+banach probe && banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf
+```
 
-## Install
+**Ran one of these?** [Post your numbers](https://github.com/gautam1858/banach/issues/new?title=Benchmark:%20MODEL%20on%20MACHINE)
+with the output of `banach probe` and `banach run`. Measured results replace the planner's
+numbers in this table, with your name on them.
+
+## Get started in one line
 
 ```bash
 pip install banach
 ```
 
-That is the whole install: the `banach` command and its engine, prebuilt for Linux x86_64,
-Linux arm64 and macOS on Apple Silicon. Windows and GPU builds: [from source](#build-from-source).
+The `banach` command and its engine, prebuilt for Linux x86_64, Linux arm64 and macOS on
+Apple Silicon. Windows and GPU builds: [from source](#build-from-source).
 
-## 60-second start
-
-1. **See the speed before you download.** This reads a few MB of headers, not 22 GB:
+1. **See the speed before you download:**
 
    ```bash
    banach plan hf:unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
    ```
 
-2. **Serve it** with an OpenAI and Anthropic compatible API. `--lazy` starts answering while
-   the file is still downloading:
+2. **Serve it.** `--lazy` starts answering while the file is still downloading:
 
    ```bash
    banach serve hf:unsloth/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --lazy
    ```
 
-3. **Use it** from anything that speaks OpenAI or Anthropic, coding agents included (tool use
-   works on both APIs):
+3. **Use it** from anything that speaks OpenAI or Anthropic, coding agents included:
 
    ```python
    from openai import OpenAI
@@ -104,7 +135,34 @@ Linux arm64 and macOS on Apple Silicon. Windows and GPU builds: [from source](#b
        model="local", max_tokens=200, messages=[{"role": "user", "content": "Hello!"}]).content[0].text)
    ```
 
-4. **Watch it** at `http://127.0.0.1:8080/banach/status`: engine, fidelity meter, download.
+4. **Watch it live** at `http://127.0.0.1:8080/banach/status`: engine, fidelity meter, download.
+
+## How a trillion parameters fit
+
+A Mixture-of-Experts model is huge on disk but small per token: Kimi K2 has a trillion
+parameters and uses about 32 billion of them for each token. The trick is to have the right
+3% in memory at the right moment.
+
+When the file does not fit, plain llama.cpp leaves it to the operating system, which pages
+bytes in 4 KB at a time with no idea which experts come next. Banach knows the model:
+
+```mermaid
+flowchart LR
+    T([next token]) --> R[router picks 8 of 384 experts]
+    R --> Q{in the RAM budget?}
+    Q -- "yes, 96% of the time" --> C[compute]
+    Q -- no --> F[fetch the whole expert<br>from NVMe, in parallel] --> C
+    C --> A[keep experts that are used often,<br>evict cold ones in the background]
+    A --> T
+```
+
+- **Plan first.** `banach plan` reads a few MB of headers and works out the speed, the hot
+  set and the split across GPU, RAM and disk before you download anything.
+- **Stream on purpose.** Whole experts, fetched in parallel the moment the router picks them,
+  inside a RAM budget you choose. Experts earn their place by how often they are used.
+- **Prove it.** Every configuration is checked against stock llama.cpp, token for token and
+  logit for logit, in CI on every commit. Optional faster low-precision experts come with a
+  live fidelity meter, so a shortcut is never silent.
 
 ## Runs everywhere
 
@@ -115,26 +173,24 @@ Linux arm64 and macOS on Apple Silicon. Windows and GPU builds: [from source](#b
 | macOS, Apple Silicon | CPU, Metal | prefetch, soft budget |
 | Any GPU | `--gpu-layers N` | dense layers on the GPU, experts streamed from RAM |
 
-Byte-exact against stock llama.cpp in CI on every commit, on Linux x64, Linux arm64 and
-Windows; CUDA and Vulkan builds are compiled in CI too.
+Byte-exact against stock llama.cpp in CI on Linux x64, Linux arm64 and Windows; CUDA and
+Vulkan builds compiled in CI.
 
-## Features
+## Everything in the box
 
 | | |
 |---|---|
-| Preflight | speed estimate and memory split from headers alone, before any download |
-| Lossless streaming | RAM budget for experts, parallel whole-expert fetch, frequency-gated admission, background eviction |
-| GPU offload | dense layers and KV cache on CUDA, Metal or Vulkan; experts stay in RAM |
-| APIs | OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`, streaming, tool use, prefix cache |
-| Downloads | resumable, hot experts first, SHA-256 verified; serve before the download ends |
-| Fidelity meter | shadow replay against the exact model with anytime-valid confidence bounds |
-
-## Commands
+| **Preflight** | speed, hot set and memory split from 16 MB of headers, before any download |
+| **Lossless streaming** | expert RAM budget, parallel whole-expert fetch, frequency-gated admission, background eviction |
+| **GPU offload** | dense layers and KV cache on CUDA, Metal or Vulkan; experts stay in RAM |
+| **Drop-in APIs** | OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`, streaming, tool use, prefix cache |
+| **Smart downloads** | resumable, hot experts first, SHA-256 verified; serve before the download ends |
+| **Fidelity meter** | shadow replay against the exact model with anytime-valid confidence bounds |
 
 | Command | What it does |
 |---|---|
-| `banach plan MODEL` | speed estimate and memory split for your machine, from headers |
-| `banach serve MODEL` | local OpenAI and Anthropic compatible server (`--lazy`, `--gpu-layers N`) |
+| `banach plan MODEL` | speed and memory split for your machine, from headers |
+| `banach serve MODEL` | local OpenAI and Anthropic server (`--lazy`, `--gpu-layers N`) |
 | `banach run MODEL -p TEXT` | one generation with the planned expert budget |
 | `banach pull hf:...` | resumable, prioritised, verified download |
 | `banach probe` | measures your memory bandwidth, compute and disk |
@@ -154,28 +210,31 @@ ninja -C build-engine banach-engine
 export BANACH_ENGINE=$PWD/build-engine/banach-engine
 ```
 
-- **GPU:** add `-DGGML_CUDA=ON` or `-DGGML_VULKAN=ON` to the cmake line (Metal is on by
-  default on macOS) and serve with `--gpu-layers 99`.
+- **GPU:** add `-DGGML_CUDA=ON` or `-DGGML_VULKAN=ON` (Metal is on by default on macOS) and
+  serve with `--gpu-layers 99`.
 - **Windows:** the same steps from a Visual Studio developer prompt; the engine is
   `build-engine\banach-engine.exe`.
-- A source build is tuned for your exact CPU and is faster still than the prebuilt binaries.
+- A source build is tuned for your exact CPU and is faster still.
 
-## Good to know
+Good to know: one request at a time (others queue); the hard RAM budget is Linux, while macOS
+and Windows give identical output with a softer budget; small models (1 to 3B) call tools fine
+but are weak coding agents.
 
-- One request at a time; concurrent requests queue.
-- The hard RAM budget is Linux; macOS and Windows give identical output with a softer budget.
-- Small models (1 to 3B) call tools fine but are weak coding agents; use a bigger model for
-  agent work.
+## Join in
 
-Every number in this README, with machine, model, commit and command:
-[docs/VALIDATION.md](docs/VALIDATION.md).
+- **Star the repo** so more people find it.
+- **Post your numbers.** Every machine and model measured makes the planner sharper for
+  everyone. [Open a benchmark issue](https://github.com/gautam1858/banach/issues/new?title=Benchmark:%20MODEL%20on%20MACHINE).
+- **Fund the hardware.** The trillion-parameter runs need big NVMe arrays and GPUs:
 
-## Support
+<p align="center">
+  <a href="https://buymeacoffee.com/gautam1858"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="52"></a>
+</p>
 
-Banach is free and open source. If it saves you a hardware upgrade, help fund test machines
-and GPUs for the next round of benchmarks:
+## Why "Banach"?
 
-<a href="https://buymeacoffee.com/gautam1858"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
+The Banach-Tarski paradox: cut one ball into a handful of pieces, reassemble them, and you
+have two balls the same size as the first. More model than your machine should hold.
 
 ## Credits
 
