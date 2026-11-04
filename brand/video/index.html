@@ -1,0 +1,518 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Banach launch film</title>
+<style>
+  html, body { margin: 0; background: #0A0B14; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Deterministic launch film. render(t) draws the frame at time t (seconds); render.js steps
+// through it frame by frame. ?w=1920&h=1080 (landscape) or ?w=1080&h=1920 (portrait).
+const q = new URLSearchParams(location.search);
+const W = +(q.get('w') || 1920), H = +(q.get('h') || 1080);
+const PORTRAIT = H > W;
+const cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+const g = cv.getContext('2d');
+const U = Math.min(W, H) / 1080;            // one unit of layout
+const CX = W / 2, CY = H / 2;
+const DURATION = 44;
+
+const BG = '#0A0B14', INK = '#F4F5FB', MUTED = '#8C90A8', DIM = '#4A4E66';
+const VIOLET = '#9A8BFF', CYAN = '#5BC8FF', MINT = '#6FFFD2';
+
+// ---------------------------------------------------------------- helpers
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => { t = clamp(t); return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; };
+const easeOut = t => 1 - Math.pow(1 - clamp(t), 3);
+const easeIn = t => Math.pow(clamp(t), 3);
+const span = (t, a, b) => clamp((t - a) / (b - a));
+// fade in over [a, a+fi], hold, fade out over [b-fo, b]
+const env = (t, a, b, fi = 0.6, fo = 0.6) => Math.min(easeOut(span(t, a, a + fi)), 1 - easeIn(span(t, b - fo, b)));
+
+function rng(seed) {                         // mulberry32
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let r = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    r = r + Math.imul(r ^ r >>> 7, 61 | r) ^ r;
+    return ((r ^ r >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function grad(x0, y0, x1, y1) {
+  const gr = g.createLinearGradient(x0, y0, x1, y1);
+  gr.addColorStop(0, VIOLET); gr.addColorStop(0.5, CYAN); gr.addColorStop(1, MINT);
+  return gr;
+}
+
+function text(s, x, y, size, opts = {}) {
+  g.save();
+  g.font = `${opts.weight || 500} ${size * U}px ${opts.mono ? '"DejaVu Sans Mono", monospace' : (opts.display ? '"Inter Display", Inter, sans-serif' : 'Inter, sans-serif')}`;
+  g.textAlign = opts.align || 'center';
+  g.textBaseline = opts.baseline || 'middle';
+  g.globalAlpha *= opts.alpha === undefined ? 1 : opts.alpha;
+  if (opts.spacing !== undefined) g.letterSpacing = `${opts.spacing * U}px`;
+  g.fillStyle = opts.color || INK;
+  g.fillText(s, x, y);
+  const w = g.measureText(s).width;
+  g.restore();
+  return w;
+}
+
+// caption: rises a little as it fades in
+function caption(s, t, a, b, y, size = 52, opts = {}) {
+  const e = env(t, a, b, 0.7, 0.5);
+  if (e <= 0) return;
+  text(s, opts.x === undefined ? CX : opts.x, y + (1 - e) * 18 * U, size, { ...opts, alpha: e * (opts.alpha || 1) });
+}
+
+function roundRect(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  g.beginPath();
+  g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+// ---------------------------------------------------------------- the shards (same cuts as the logo)
+const CUTS = [[0.30, 0.26], [2.45, 0.20], [4.40, 0.30]];
+function circlePoly(n = 160) {
+  const p = [];
+  for (let i = 0; i < n; i++) p.push([Math.cos(2 * Math.PI * i / n), Math.sin(2 * Math.PI * i / n)]);
+  return p;
+}
+function clipHalf(poly, a, b, c) {
+  const out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    const fp = a * p[0] + b * p[1] - c, fq = a * q[0] + b * q[1] - c;
+    if (fp <= 0) out.push(p);
+    if ((fp < 0) !== (fq < 0) && fp !== fq) {
+      const t = fp / (fp - fq);
+      out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
+    }
+  }
+  return out;
+}
+const SHARDS = (() => {
+  let pieces = [circlePoly()];
+  for (const [ang, off] of CUTS) {
+    const a = Math.cos(ang), b = Math.sin(ang), c = off;
+    const next = [];
+    for (const p of pieces) for (const s of [1, -1]) { const q = clipHalf(p, s * a, s * b, s * c); if (q.length >= 3) next.push(q); }
+    pieces = next;
+  }
+  return pieces.map(p => {
+    let cx = 0, cy = 0; for (const [x, y] of p) { cx += x; cy += y; } cx /= p.length; cy /= p.length;
+    return { pts: p.map(([x, y]) => [x - cx, y - cy]), cx, cy };
+  });
+})();
+const SHADES = [1.0, 0.8, 0.92, 0.72, 0.88, 0.78, 0.96];
+
+// draw one shard: local points around its centroid, placed at (x, y), rotated, scaled by r
+function shard(s, x, y, r, rot, alpha, fill, gap = 0) {
+  g.save();
+  g.translate(x, y); g.rotate(rot);
+  g.beginPath();
+  s.pts.forEach(([px, py], i) => { const X = px * r, Y = py * r; i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+  g.closePath();
+  g.globalAlpha *= alpha;
+  if (fill === null) {
+    const gr = g.createLinearGradient(-r, -r, r, r);
+    gr.addColorStop(0, VIOLET); gr.addColorStop(0.5, CYAN); gr.addColorStop(1, MINT);
+    g.fillStyle = gr;
+  } else g.fillStyle = fill;
+  g.fill();
+  if (gap > 0) { g.lineWidth = gap; g.strokeStyle = BG; g.stroke(); }
+  g.restore();
+}
+
+// an assembled sphere drawn exactly like the logo: one gradient disc, the cuts as gaps
+function solidDisc(x, y, r, turn, alpha, cut) {
+  g.save();
+  g.globalAlpha *= alpha;
+  g.fillStyle = grad(x - r * 1.3, y - r * 1.3, x + r * 1.3, y + r * 1.3);
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  // subtle per-shard shading
+  SHARDS.forEach((sh, i) => {
+    const c = Math.cos(turn), sn = Math.sin(turn);
+    const ox = sh.cx * c - sh.cy * sn, oy = sh.cx * sn + sh.cy * c;
+    g.save(); g.translate(x + ox * r, y + oy * r); g.rotate(turn);
+    g.beginPath(); sh.pts.forEach(([px, py], k) => k ? g.lineTo(px * r, py * r) : g.moveTo(px * r, py * r)); g.closePath();
+    g.fillStyle = `rgba(10,11,20,${(1 - SHADES[i]) * 0.9})`; g.fill();
+    g.restore();
+  });
+  if (cut > 0) {
+    g.strokeStyle = BG; g.lineWidth = cut; g.lineCap = 'butt';
+    for (const [ang0, off] of CUTS) {
+      const ang = ang0 + turn, a = Math.cos(ang), b = Math.sin(ang);
+      const d = off * r, h = Math.sqrt(Math.max(r * r - d * d, 0));
+      const mx = x + a * d, my = y + b * d;
+      g.beginPath(); g.moveTo(mx - b * h, my + a * h); g.lineTo(mx + b * h, my - a * h); g.stroke();
+    }
+  }
+  g.restore();
+}
+
+// one disc made of shards; spread > 0 pulls the pieces apart from the centre
+function disc(x, y, r, turn, alpha, spread = 0, spin = 0, gap = 7 * U) {
+  const fill = grad(x - r, y - r, x + r, y + r);
+  SHARDS.forEach((s, i) => {
+    const c = Math.cos(turn), sn = Math.sin(turn);
+    const ox = (s.cx * c - s.cy * sn), oy = (s.cx * sn + s.cy * c);
+    const k = 1 + spread;
+    g.save(); g.globalAlpha *= SHADES[i];
+    shard(s, x + ox * r * k, y + oy * r * k, r, turn + spin * (i % 2 ? 1 : -1) * (0.4 + i * 0.07), alpha, fill, gap);
+    g.restore();
+  });
+}
+
+function glow(x, y, r, a) {
+  const gr = g.createRadialGradient(x, y, 0, x, y, r);
+  gr.addColorStop(0, `rgba(91,200,255,${0.22 * a})`);
+  gr.addColorStop(0.5, `rgba(154,139,255,${0.08 * a})`);
+  gr.addColorStop(1, 'rgba(10,11,20,0)');
+  g.fillStyle = gr;
+  g.fillRect(x - r, y - r, 2 * r, 2 * r);
+}
+
+// the B mark: stem + two discs, upper is the lower turned half a turn
+function mark(x, y, size, a, stemGrow = 1) {
+  const r = 88 / 512 * size, s = size / 512;
+  const cx = x + (246 - 256) * s, up = y + (170 - 256) * s, lo = y + (342 - 256) * s;
+  g.save(); g.globalAlpha *= a;
+  const sx = x + (124 - 256) * s, sy = y + (82 - 256) * s, sw = 38 * s, sh = 348 * s;
+  g.fillStyle = grad(sx, sy, sx + sw * 4, sy + sh);
+  roundRect(sx, sy + sh * (1 - stemGrow), sw, sh * stemGrow, sw / 2); g.fill();
+  solidDisc(cx, lo, r, 0, 1, 9 * s);
+  solidDisc(cx, up, r, Math.PI, 1, 9 * s);
+  g.restore();
+}
+
+// ---------------------------------------------------------------- background
+function background(t) {
+  g.fillStyle = BG; g.fillRect(0, 0, W, H);
+  // slow drifting aurora
+  const ax = CX + Math.sin(t * 0.13) * W * 0.18, ay = CY - H * 0.25 + Math.cos(t * 0.11) * H * 0.06;
+  const gr = g.createRadialGradient(ax, ay, 0, ax, ay, Math.max(W, H) * 0.75);
+  gr.addColorStop(0, 'rgba(110,90,255,0.10)'); gr.addColorStop(0.45, 'rgba(60,160,255,0.05)'); gr.addColorStop(1, 'rgba(10,11,20,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  // fine dot grid
+  g.fillStyle = 'rgba(255,255,255,0.035)';
+  const step = 36 * U;
+  for (let y = (t * 6 * U) % step; y < H; y += step) for (let x = 0; x < W; x += step) g.fillRect(x, y, 1.4 * U, 1.4 * U);
+  // vignette
+  const vg = g.createRadialGradient(CX, CY, Math.min(W, H) * 0.35, CX, CY, Math.max(W, H) * 0.8);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+}
+
+// ---------------------------------------------------------------- scenes
+const R0 = (PORTRAIT ? 170 : 190) * U;      // hero sphere radius
+
+function sceneSphere(t) {                     // 0 - 5
+  if (t > 5.4) return;
+  const a = 1 - easeIn(span(t, 4.9, 5.4)) * 0;  // carries into the next scene
+  const r = rng(7);
+  const form = ease(span(t, 0.2, 2.6));
+  // dust converging into the sphere
+  for (let i = 0; i < 700; i++) {
+    const ang = r() * Math.PI * 2, rad = Math.sqrt(r());
+    const tx = CX + Math.cos(ang) * rad * R0, ty = CY + Math.sin(ang) * rad * R0;
+    const sa = r() * Math.PI * 2, sd = (0.6 + r() * 0.9) * Math.max(W, H);
+    const sx = CX + Math.cos(sa) * sd, sy = CY + Math.sin(sa) * sd;
+    const k = ease(clamp(form * 1.15 - r() * 0.15));
+    const x = lerp(sx, tx, k), y = lerp(sy, ty, k);
+    g.fillStyle = i % 3 ? CYAN : VIOLET;
+    g.globalAlpha = (0.25 + 0.6 * k) * (1 - easeIn(span(t, 2.4, 3.2)));
+    g.fillRect(x, y, 2.2 * U, 2.2 * U);
+  }
+  g.globalAlpha = 1;
+  const solid = easeOut(span(t, 2.2, 3.2));
+  glow(CX, CY, R0 * 2.6, solid);
+  solidDisc(CX, CY, R0 * (0.96 + 0.04 * Math.sin(t * 1.3)), 0, solid * a, 0);
+  const capY = PORTRAIT ? CY + R0 + 210 * U : H - 150 * U;
+  caption('One model.', t, 0.9, 2.9, capY, PORTRAIT ? 64 : 58, { display: true, weight: 600 });
+  caption('284 billion parameters.', t, 3.0, 5.0, capY, PORTRAIT ? 64 : 58, { display: true, weight: 600 });
+}
+
+function sceneParadox(t) {                    // 5 - 10.4
+  if (t < 4.9 || t > 10.6) return;
+  const crack = span(t, 5.0, 5.9);
+  const burst = ease(span(t, 5.9, 7.0));
+  const gather = ease(span(t, 7.0, 8.7));
+  const stem = ease(span(t, 8.4, 9.2));
+  const out = 1 - easeIn(span(t, 10.0, 10.6));
+  // final logo position and size
+  const size = (PORTRAIT ? 560 : 600) * U;
+  const s = size / 512, rFinal = 88 * s;
+  const lo = [CX + (246 - 256) * s, CY - 40 * U + (342 - 256) * s];
+  const up = [CX + (246 - 256) * s, CY - 40 * U + (170 - 256) * s];
+  const r = lerp(R0, rFinal, gather);
+  g.save(); g.globalAlpha = out;
+  glow(CX, CY - 40 * U, lerp(R0 * 2.6, size * 1.3, gather), 1);
+  if (t < 5.9) {
+    // the crack lines draw across the sphere
+    solidDisc(CX, CY, R0 * (0.96 + 0.04 * Math.sin(t * 1.3)), 0, 1, 8 * U * easeOut(crack));
+  } else if (gather >= 1 && stem >= 1) {
+    mark(CX, CY - 40 * U, size, 1, 1);
+  } else {
+    // shards fly apart; each piece becomes two: one goes down (as is), one goes up (turned)
+    const spread = 0.55 * burst * (1 - gather);
+    const spin = 0.9 * burst * (1 - gather);
+    const fill = null;
+    SHARDS.forEach((sh, i) => {
+      for (const copy of [0, 1]) {
+        const turn = copy ? Math.PI * gather : 0;
+        const c = Math.cos(turn), sn = Math.sin(turn);
+        const ox = sh.cx * c - sh.cy * sn, oy = sh.cx * sn + sh.cy * c;
+        const home = copy ? up : lo;
+        const bx = lerp(CX, home[0], gather), by = lerp(CY, home[1], gather);
+        const k = 1 + spread;
+        const wob = spin * (i % 2 ? 1 : -1) * (0.4 + i * 0.07) * (copy ? -1 : 1);
+        const alpha = copy ? easeOut(span(t, 6.1, 7.2)) : 1;
+        g.save(); g.globalAlpha *= SHADES[i] * alpha;
+        shard(sh, bx + ox * r * k, by + oy * r * k, r, turn + wob, 1, fill, 3 * U * (1 - gather));
+        g.restore();
+      }
+    });
+    if (stem > 0) {
+      g.save(); g.globalAlpha *= stem;
+      const sx = CX + (124 - 256) * s, sy = CY - 40 * U + (82 - 256) * s, sw = 38 * s, sh = 348 * s;
+      g.fillStyle = grad(sx, sy, sx + sw * 4, sy + sh);
+      roundRect(sx, sy + sh * (1 - stem), sw, sh * stem, sw / 2); g.fill();
+      g.restore();
+    }
+  }
+  g.restore();
+  const capY = PORTRAIT ? CY + 430 * U : H - 150 * U;
+  const big = PORTRAIT ? 60 : 56;
+  caption('Cut it into pieces.', t, 5.2, 7.0, capY, big, { display: true, weight: 600 });
+  caption('Put them back together. Twice.', t, 7.1, 9.0, capY, big, { display: true, weight: 600 });
+  caption('The Banach-Tarski paradox. Mathematically, it works.', t, 9.0, 10.5, capY, PORTRAIT ? 34 : 34, { color: MUTED, weight: 400 });
+}
+
+function sceneProblem(t) {                    // 10.4 - 17
+  if (t < 10.3 || t > 17.2) return;
+  const e = env(t, 10.4, 17.0, 0.6, 0.6);
+  g.save(); g.globalAlpha = e;
+  const grow = ease(span(t, 10.8, 12.6));
+  const ram = ease(span(t, 12.4, 13.6));
+  const base = PORTRAIT ? CY + 330 * U : CY + 250 * U;
+  const maxH = (PORTRAIT ? 760 : 560) * U;
+  const bw = (PORTRAIT ? 230 : 250) * U, gap = (PORTRAIT ? 120 : 220) * U;
+  const x1 = CX - gap / 2 - bw, x2 = CX + gap / 2;
+  const h1 = maxH * grow, h2 = maxH * 32 / 155 * ram;
+  g.fillStyle = grad(x1, base - maxH, x1 + bw, base);
+  roundRect(x1, base - h1, bw, Math.max(h1, 1), 18 * U); g.fill();
+  g.fillStyle = 'rgba(244,245,251,0.10)';
+  roundRect(x2, base - h2, bw, Math.max(h2, 1), 18 * U); g.fill();
+  g.strokeStyle = 'rgba(244,245,251,0.35)'; g.lineWidth = 2 * U; g.stroke();
+  text(`${Math.round(155 * grow)} GB`, x1 + bw / 2, base - h1 - 46 * U, 64, { display: true, weight: 700, alpha: grow });
+  text('DeepSeek V4 Flash', x1 + bw / 2, base + 46 * U, 30, { color: MUTED, weight: 500, alpha: grow });
+  text(`${Math.round(32 * ram)} GB`, x2 + bw / 2, base - h2 - 46 * U, 64, { display: true, weight: 700, alpha: ram });
+  text('your RAM', x2 + bw / 2, base + 46 * U, 30, { color: MUTED, weight: 500, alpha: ram });
+  g.restore();
+  const capY = PORTRAIT ? 300 * U : 150 * U;
+  caption('It does not fit.', t, 13.6, 15.3, capY, PORTRAIT ? 64 : 58, { display: true, weight: 600 });
+  caption('Most tools tell you after the download.', t, 15.2, 17.0, capY, PORTRAIT ? 50 : 54, { display: true, weight: 600 });
+}
+
+const CARD = [
+  ['$ banach plan hf:unsloth/DeepSeek-V4-Flash-GGUF/...', INK, 400],
+  ['', INK, 400],
+  ['read 6.3 MB of headers, 14 requests, 0 weights', MUTED, 400],
+  ['284B params, 13.8B active, 256 experts x 43 layers', MUTED, 400],
+  ['', INK, 400],
+  ['32 GB, no GPU    exact   4.3 tok/s  (3.6 - 4.6)', INK, 600],
+  ['64 GB + 16 GB    exact  12.9 tok/s  (11.8 - 13.9)', INK, 600],
+  ['', INK, 400],
+  ['predicted, not promised. measured after.', CYAN, 400],
+];
+
+function scenePreflight(t) {                  // 17 - 25
+  if (t < 16.9 || t > 25.2) return;
+  const e = env(t, 17.0, 25.0, 0.7, 0.6);
+  const fs = PORTRAIT ? 25 : 30;
+  const lh = fs * 1.75 * U;
+  const cw = (PORTRAIT ? 1000 : 1080) * U, ch = (CARD.length * fs * 1.75 + 120) * U;
+  const x0 = CX - cw / 2, y0 = (PORTRAIT ? CY - ch / 2 + 60 * U : CY - ch / 2 + 40 * U) + (1 - e) * 30 * U;
+  g.save(); g.globalAlpha = e;
+  g.shadowColor = 'rgba(91,200,255,0.18)'; g.shadowBlur = 60 * U;
+  g.fillStyle = 'rgba(20,22,38,0.92)'; roundRect(x0, y0, cw, ch, 22 * U); g.fill();
+  g.shadowBlur = 0;
+  g.strokeStyle = 'rgba(244,245,251,0.10)'; g.lineWidth = 1.5 * U; g.stroke();
+  for (let i = 0; i < 3; i++) { g.fillStyle = ['#3B3F57', '#3B3F57', '#3B3F57'][i]; g.beginPath(); g.arc(x0 + (32 + i * 26) * U, y0 + 30 * U, 7 * U, 0, 7); g.fill(); }
+  // typing
+  const total = CARD.reduce((n, l) => n + l[0].length, 0);
+  let budget = Math.floor(total * ease(span(t, 17.5, 22.5)));
+  CARD.forEach(([s, col, w], i) => {
+    const show = s.slice(0, Math.max(0, budget)); budget -= s.length;
+    if (show) text(show, x0 + 40 * U, y0 + 86 * U + i * lh, fs, { mono: true, align: 'left', color: col, weight: w });
+  });
+  g.restore();
+  const capY = PORTRAIT ? 300 * U : 110 * U;
+  caption('Banach answers before you download a byte.', t, 17.3, 25.0, capY, PORTRAIT ? 48 : 54, { display: true, weight: 600 });
+}
+
+function sceneStream(t) {                     // 25 - 32
+  if (t < 24.9 || t > 32.2) return;
+  const e = env(t, 25.0, 32.0, 0.7, 0.6);
+  g.save(); g.globalAlpha = e;
+  const cols = PORTRAIT ? 16 : 32, rows = PORTRAIT ? 22 : 12;
+  const cell = (PORTRAIT ? 52 : 44) * U, pad = 10 * U;
+  const gw = cols * cell, gh = rows * cell;
+  const gx = CX - gw / 2, gy = (PORTRAIT ? CY - gh / 2 - 60 * U : CY - gh / 2 - 30 * U);
+  const hot = Math.floor(cols * 0.38);
+  // RAM region
+  g.fillStyle = 'rgba(91,200,255,0.06)'; roundRect(gx - pad, gy - pad, hot * cell + pad, gh + 2 * pad, 16 * U); g.fill();
+  g.strokeStyle = 'rgba(91,200,255,0.35)'; g.lineWidth = 1.5 * U; g.stroke();
+  text('RAM  hot experts', gx - pad, gy - 34 * U, 26, { align: 'left', color: CYAN, weight: 600 });
+  text('NVMe  exact weights, never rewritten', gx + gw, gy + gh + 52 * U, 26, { align: 'right', color: VIOLET, weight: 600 });
+  // NVMe strip
+  g.fillStyle = 'rgba(154,139,255,0.12)'; roundRect(gx, gy + gh + 16 * U, gw, 10 * U, 5 * U); g.fill();
+  const step = Math.floor(t * 12);
+  for (let r = 0; r < rows; r++) {
+    const rr = rng(1000 + r * 97 + step * 7919);
+    const active = new Set();
+    // routing: mostly hot (left), sometimes cold
+    for (let k = 0; k < 2; k++) active.add(rr() < 0.8 ? Math.floor(rr() * hot) : hot + Math.floor(rr() * (cols - hot)));
+    for (let c = 0; c < cols; c++) {
+      const x = gx + c * cell, y = gy + r * cell;
+      const on = active.has(c);
+      const isHot = c < hot;
+      g.fillStyle = on ? (isHot ? CYAN : VIOLET) : (isHot ? 'rgba(91,200,255,0.16)' : 'rgba(244,245,251,0.05)');
+      roundRect(x + 4 * U, y + 4 * U, cell - 8 * U, cell - 8 * U, 6 * U); g.fill();
+      if (on && !isHot) {
+        // a miss: bytes rise from NVMe
+        const ph = (t * 12) % 1;
+        g.fillStyle = 'rgba(154,139,255,0.7)';
+        const yy = lerp(gy + gh + 16 * U, y + cell / 2, ph);
+        g.fillRect(x + cell / 2 - 2 * U, yy, 4 * U, 14 * U);
+      }
+    }
+  }
+  g.restore();
+  const capY = PORTRAIT ? 230 * U : 90 * U;
+  caption('Exact weights stay on disk. Hot experts live in RAM.', t, 25.2, 28.6, capY, PORTRAIT ? 42 : 50, { display: true, weight: 600 });
+  const chipY = PORTRAIT ? H - 300 * U : H - 110 * U;
+  const c1 = env(t, 28.5, 32.0, 0.5, 0.6), c2 = env(t, 29.3, 32.0, 0.5, 0.6);
+  if (PORTRAIT) {
+    text('2.1x faster than naive streaming', CX, chipY, 40, { display: true, weight: 700, alpha: c1 });
+    text('byte-identical to stock llama.cpp, 12 of 12 configs', CX, chipY + 70 * U, 28, { color: MUTED, alpha: c2 });
+  } else {
+    text('2.1x faster than naive streaming', CX - 330 * U, chipY, 40, { display: true, weight: 700, alpha: c1 });
+    text('byte-identical to stock llama.cpp', CX + 380 * U, chipY, 40, { display: true, weight: 700, alpha: c2 });
+  }
+  caption('Measured on a 1B-A400M MoE, 40% of its experts in RAM.', t, 29.5, 32.0, PORTRAIT ? H - 150 * U : H - 50 * U, 22, { color: DIM, weight: 400 });
+}
+
+function sceneMeter(t) {                      // 32 - 38.4
+  if (t < 31.9 || t > 38.6) return;
+  const e = env(t, 32.0, 38.4, 0.7, 0.6);
+  g.save(); g.globalAlpha = e;
+  const cw = (PORTRAIT ? 900 : 1300) * U, ch = (PORTRAIT ? 760 : 520) * U;
+  const x0 = CX - cw / 2, y0 = CY - ch / 2 + (PORTRAIT ? 40 : 60) * U;
+  // axes
+  g.strokeStyle = 'rgba(244,245,251,0.18)'; g.lineWidth = 2 * U;
+  g.beginPath(); g.moveTo(x0, y0); g.lineTo(x0, y0 + ch); g.lineTo(x0 + cw, y0 + ch); g.stroke();
+  // budget line (log scale: 10% at top, 0.1% at bottom)
+  const yOf = p => y0 + ch * (Math.log10(0.1) - Math.log10(p)) / 2;
+  const yb = yOf(0.01);
+  g.setLineDash([12 * U, 10 * U]); g.strokeStyle = 'rgba(111,255,210,0.7)';
+  g.beginPath(); g.moveTo(x0, yb); g.lineTo(x0 + cw, yb); g.stroke(); g.setLineDash([]);
+  text('budget 1%', x0 + cw, yb - 26 * U, 26, { align: 'right', color: MINT, weight: 600 });
+  // upper confidence bound shrinking with tokens (illustrative shape of a betting bound)
+  const prog = ease(span(t, 32.6, 36.6));
+  const N = 240;
+  g.strokeStyle = grad(x0, y0, x0 + cw, y0 + ch); g.lineWidth = 5 * U; g.lineCap = 'round';
+  g.beginPath();
+  let lastX = x0, lastY = yOf(0.1);
+  for (let i = 0; i <= N * prog; i++) {
+    const n = 50 + i / N * 6000;
+    const ucb = Math.min(0.1, 0.006 + 0.9 / n + 0.12 / Math.sqrt(n));
+    const x = x0 + cw * i / N, y = yOf(ucb);
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+    lastX = x; lastY = y;
+  }
+  g.stroke();
+  g.fillStyle = INK; g.beginPath(); g.arc(lastX, lastY, 9 * U, 0, 7); g.fill();
+  // flips: rare dots along the bottom
+  const fr = rng(42);
+  for (let i = 0; i < 70; i++) { const fx = fr(); if (fx < prog) { g.fillStyle = 'rgba(154,139,255,0.8)'; g.fillRect(x0 + cw * fx, y0 + ch - 18 * U, 3 * U, 12 * U); } }
+  text('upper confidence bound on top-1 flips', x0 + 10 * U, y0 - 26 * U, 26, { align: 'left', color: MUTED, weight: 500 });
+  text('tokens of your own traffic', x0 + cw, y0 + ch + 36 * U, 24, { align: 'right', color: DIM });
+  text('illustration', x0 + cw, y0 - 26 * U, 20, { align: 'right', color: DIM });
+  const ok = easeOut(span(t, 36.4, 37.0));
+  if (ok > 0) text('below budget, at any sample size', lastX - 20 * U, lastY + 56 * U, 30, { align: 'right', color: MINT, weight: 700, alpha: ok });
+  g.restore();
+  const capY = PORTRAIT ? 260 * U : 90 * U;
+  caption('Every shortcut is measured against the exact model.', t, 32.2, 35.4, capY, PORTRAIT ? 42 : 50, { display: true, weight: 600 });
+  caption('On your prompts. Continuously.', t, 35.4, 38.4, capY, PORTRAIT ? 46 : 50, { display: true, weight: 600 });
+}
+
+function sceneReveal(t) {                     // 38.4 - 44
+  if (t < 38.3) return;
+  const a = easeOut(span(t, 38.4, 39.6));
+  const out = 1 - easeIn(span(t, 43.2, 44.0));
+  g.save(); g.globalAlpha = out;
+  const size = (PORTRAIT ? 420 : 380) * U;
+  const mx = PORTRAIT ? CX : CX - 420 * U, my = PORTRAIT ? CY - 260 * U : CY;
+  glow(mx, my, size * 1.4, a);
+  mark(mx, my + (1 - a) * 30 * U, size, a, ease(span(t, 38.4, 39.4)));
+  const word = 'banach';
+  const wx = PORTRAIT ? CX : CX - 140 * U, wy = PORTRAIT ? CY + 120 * U : CY - 40 * U;
+  g.save();
+  g.font = `700 ${(PORTRAIT ? 190 : 200) * U}px "Inter Display", Inter, sans-serif`;
+  g.letterSpacing = `${-5 * U}px`;
+  g.textAlign = PORTRAIT ? 'center' : 'left'; g.textBaseline = 'middle';
+  const full = g.measureText(word).width;
+  let x = PORTRAIT ? wx - full / 2 : wx;
+  g.textAlign = 'left';
+  for (let i = 0; i < word.length; i++) {
+    const k = easeOut(span(t, 39.0 + i * 0.08, 39.6 + i * 0.08));
+    g.globalAlpha = out * k;
+    g.fillStyle = INK;
+    g.fillText(word[i], x, wy + (1 - k) * 26 * U);
+    x += g.measureText(word[i]).width - 5 * U;
+  }
+  g.restore();
+  const tx = PORTRAIT ? CX : wx + 8 * U, al = PORTRAIT ? 'center' : 'left';
+  const t1 = easeOut(span(t, 39.9, 40.7)), t2 = easeOut(span(t, 40.5, 41.3)), t3 = easeOut(span(t, 41.1, 41.9));
+  text('More model than your machine should hold.', tx, wy + (PORTRAIT ? 150 : 140) * U, PORTRAIT ? 40 : 42, { align: al, color: INK, weight: 500, alpha: t1 });
+  text('Predict.  Stream.  Prove.', tx, wy + (PORTRAIT ? 225 : 210) * U, PORTRAIT ? 36 : 36, { align: al, color: CYAN, weight: 600, alpha: t2, spacing: 2 });
+  text('open source  ·  github.com/gautam1858/banach', tx, wy + (PORTRAIT ? 300 : 280) * U, PORTRAIT ? 28 : 28, { align: al, color: MUTED, weight: 400, alpha: t3 });
+  g.restore();
+}
+
+function render(t) {
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalAlpha = 1;
+  background(t);
+  sceneSphere(t);
+  sceneParadox(t);
+  sceneProblem(t);
+  scenePreflight(t);
+  sceneStream(t);
+  sceneMeter(t);
+  sceneReveal(t);
+  // fade in from black, fade out to black
+  const fade = Math.max(1 - span(t, 0, 0.6), span(t, 43.4, 44));
+  if (fade > 0) { g.globalAlpha = fade; g.fillStyle = '#000'; g.fillRect(0, 0, W, H); g.globalAlpha = 1; }
+}
+window.render = render;
+window.DURATION = DURATION;
+if (!q.get('static')) {
+  // live preview in a browser
+  const t0 = performance.now();
+  const loop = () => { render(((performance.now() - t0) / 1000) % DURATION); requestAnimationFrame(loop); };
+  document.fonts.ready.then(loop);
+}
+</script>
+</body>
+</html>

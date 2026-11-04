@@ -1,3 +1,5 @@
+<p align="center"><img src="brand/logo-lockup.png" alt="banach" width="640"></p>
+
 # Banach
 
 > Banach-Tarski for language models: more model than your machine should hold.
