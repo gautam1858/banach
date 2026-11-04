@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/sponsors/gautam1858"><img src="https://img.shields.io/badge/Sponsor-gautam1858-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor gautam1858"></a>
+</p>
+
+<p align="center">
   <a href="brand/video/banach-launch-16x9.mp4">Watch the 44 s film</a> &nbsp;|&nbsp;
   <a href="#install">Install</a> &nbsp;|&nbsp;
   <a href="#60-second-start">60-second start</a> &nbsp;|&nbsp;
@@ -98,7 +102,7 @@ engine comes with the other channels or [from source](#build-from-source).
 | Lossless streaming | `banach-engine` keeps a RAM budget for routed experts: parallel whole-expert fetch, frequency-gated admission, background eviction; byte-identical to stock llama.cpp |
 | Precision ladder | llama.cpp patch: each routed slot reads either the exact or a low-bit copy of its expert; numerically exact plumbing |
 | Fidelity meter | shadow-exact replay, betting confidence sequences on top-1 flips, PI controller on the ladder threshold |
-| APIs | OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`, streaming and not, prefix cache; tested with both official SDKs |
+| APIs | OpenAI `/v1/chat/completions` and Anthropic `/v1/messages`, streaming and not, tool use, prefix cache; tested with both official SDKs |
 | Downloads | `banach pull`: resumable, dense tensors and hot experts first, SHA-256 against the Hugging Face LFS id; `serve --lazy` starts before the download ends |
 
 Measured numbers, with machine, model, quant and command for each, are in
@@ -136,7 +140,11 @@ portable prebuilt binaries.
 
 ## Limits, stated plainly
 
-- Tool use (function calling) is not supported yet; requests with tools get a 400.
+- Tool use works on both APIs (OpenAI `tools` / `tool_calls`, Anthropic `tool_use` /
+  `tool_result`), streaming included. Templates llama.cpp knows get grammar-constrained,
+  natively parsed calls; others fall back to extracting JSON calls from the output. How well
+  a model uses tools is up to the model: small models (1 to 3B) call simple tools reliably
+  but are weak agents.
 - One request at a time; concurrent requests queue.
 - Linux only for streaming and lazy mode (`readahead`, `MADV_POPULATE_READ`); macOS needs
   another fetch path.
@@ -175,6 +183,12 @@ Banach builds on other people's work and says so:
 - Unsloth and AtomicChat: published fidelity tables for DeepSeek V4 quants.
 - Research: Si et al. and Liang et al. on expert locality; SliceMoE, DyMoE and HOBBIT on
   mixed-precision experts; Waudby-Smith and Ramdas on betting confidence sequences.
+
+## Sponsor
+
+If Banach is useful to you, you can support its development through
+[GitHub Sponsors](https://github.com/sponsors/gautam1858). The Sponsor button at the top of
+the repository page lists every way to give.
 
 ## License
 

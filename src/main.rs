@@ -9,6 +9,7 @@ mod pull;
 mod serve;
 mod profile;
 mod source;
+mod tools;
 
 use planner::{Calibration, Constraints, Plan, Report, GB};
 use probe::Hardware;

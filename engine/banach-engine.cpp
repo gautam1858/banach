@@ -19,6 +19,9 @@
 #include "ggml-backend.h"
 #include "gguf.h"
 #include "mini_json.h"
+#include "chat.h"
+#include "sampling.h"
+#include "json.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -929,31 +932,6 @@ static std::string token_piece(const llama_vocab * vocab, llama_token t) {
     return std::string(buf, (size_t) n);
 }
 
-static std::string render_chat(const llama_model * model, const mini_json::Value & msgs) {
-    std::vector<std::string> roles, contents;
-    for (const auto & m : msgs.arr) {
-        const auto * r = m.get("role");
-        const auto * c = m.get("content");
-        if (!r || r->kind != mini_json::Value::STR || !c || c->kind != mini_json::Value::STR)
-            throw std::runtime_error("each message needs a string role and string content");
-        roles.push_back(r->str);
-        contents.push_back(c->str);
-    }
-    const char * tmpl = llama_model_chat_template(model, nullptr);
-    if (!tmpl) throw std::runtime_error("the model has no chat template; send \"prompt\" instead");
-    std::vector<llama_chat_message> cm;
-    size_t total = 0;
-    for (size_t i = 0; i < roles.size(); i++) { cm.push_back({roles[i].c_str(), contents[i].c_str()}); total += contents[i].size(); }
-    std::vector<char> buf(2 * total + 4096);
-    int n = llama_chat_apply_template(tmpl, cm.data(), cm.size(), true, buf.data(), (int) buf.size());
-    if (n < 0) throw std::runtime_error("chat template not supported by llama_chat_apply_template");
-    if ((size_t) n > buf.size()) {
-        buf.resize((size_t) n + 1);
-        n = llama_chat_apply_template(tmpl, cm.data(), cm.size(), true, buf.data(), (int) buf.size());
-    }
-    return std::string(buf.data(), (size_t) n);
-}
-
 struct Topped {
     int argmax;
     float margin;  // top-1 minus top-2 log-prob
@@ -1045,6 +1023,7 @@ static int serve_main(llama_model * model, llama_model * low, const Args & a) {
     }
     llama_memory_t mem = llama_get_memory(ctx);
     std::vector<llama_token> kv;  // tokens currently in ctx's KV (prefix cache)
+    common_chat_templates_ptr tmpls = common_chat_templates_init(model, "");
     llama_batch batch = llama_batch_init(a.ubatch, 0, 1);
 
     auto decode = [&](llama_context * c, const llama_token * t, int n, int pos0, bool all_logits) {
@@ -1126,34 +1105,73 @@ static int serve_main(llama_model * model, llama_model * low, const Args & a) {
             }
             if (op != "generate") throw std::runtime_error("unknown op " + op);
 
-            std::string text;
-            bool templated = false;
-            if (const auto * mv = req.get("messages"); mv && mv->kind == mini_json::Value::ARR) {
-                text = render_chat(model, *mv);
-                templated = true;
-            } else if (const auto * pv = req.get("prompt"); pv && pv->kind == mini_json::Value::STR) {
-                text = pv->str;
+            const common_json body = common_json::parse(line);
+            const std::string idj = mini_json::escape(id);
+
+            // ---- prompt: chat messages through the model's own Jinja template (with tools), or raw
+            std::vector<llama_token> toks;
+            std::unique_ptr<common_chat_session> session;
+            common_chat_parser_params parse_params;
+            std::vector<std::string> stops;
+            if (body.contains("messages")) {
+                common_chat_templates_inputs in;
+                in.messages = common_chat_msgs_parse_oaicompat(body.at("messages"));
+                if (body.contains("tools") && !body.at("tools").is_null())
+                    in.tools = common_chat_tools_parse_oaicompat(body.at("tools"));
+                if (body.contains("tool_choice") && body.at("tool_choice").is_string())
+                    in.tool_choice = common_chat_tool_choice_parse_oaicompat(body.at("tool_choice").get<std::string>());
+                in.parallel_tool_calls = body.value("parallel_tool_calls", true);
+                in.use_jinja = true;
+                in.add_generation_prompt = true;
+                session = std::make_unique<common_chat_session>(tmpls.get(), vocab, in);
+                // template text may contain special tokens; user input must not become one
+                bool first = true;
+                for (const auto & part : session->prompt().parts) {
+                    const std::string & tx = part.text;
+                    if (tx.empty()) continue;
+                    int n = -llama_tokenize(vocab, tx.data(), (int) tx.size(), nullptr, 0, first, !part.is_input);
+                    std::vector<llama_token> pt((size_t) std::max(n, 0));
+                    if (n > 0 && llama_tokenize(vocab, tx.data(), (int) tx.size(), pt.data(), n, first, !part.is_input) < 0)
+                        throw std::runtime_error("tokenization failed");
+                    toks.insert(toks.end(), pt.begin(), pt.end());
+                    first = false;
+                }
+                if (getenv("BANACH_DEBUG")) {
+                    common_params_sampling dbg;
+                    session->apply_sampling(dbg);
+                    const std::string ps = session->prompt().str();
+                    fprintf(stderr, "chat: format %s, grammar %zu chars, lazy %d, %zu triggers\n",
+                            common_chat_format_name(session->format()), dbg.grammar.grammar.size(), (int) dbg.grammar_lazy,
+                            dbg.grammar_triggers.size());
+                    for (const auto & tr : dbg.grammar_triggers) fprintf(stderr, "chat: trigger %d [%s]\n", (int) tr.type, tr.value.c_str());
+                    fprintf(stderr, "chat: prompt tail [%s]\n", ps.substr(ps.size() > 400 ? ps.size() - 400 : 0).c_str());
+                }
+                parse_params.format = session->format();
+                parse_params.generation_prompt = common_chat_input(session->generation_prompt());
+                parse_params.parser = session->parser();
+                for (const auto & st : session->additional_stops()) if (!st.empty()) stops.push_back(st);
+            } else if (body.contains("prompt") && body.at("prompt").is_string()) {
+                const std::string text = body.at("prompt").get<std::string>();
+                int nt = -llama_tokenize(vocab, text.data(), (int) text.size(), nullptr, 0, true, true);
+                toks.resize((size_t) std::max(nt, 0));
+                if (nt <= 0 || llama_tokenize(vocab, text.data(), (int) text.size(), toks.data(), nt, true, true) < 0)
+                    throw std::runtime_error("tokenization failed");
             } else {
                 throw std::runtime_error("generate needs messages or prompt");
             }
-            (void) templated;
-            int nt = -llama_tokenize(vocab, text.data(), (int) text.size(), nullptr, 0, true, true);
-            std::vector<llama_token> toks((size_t) std::max(nt, 0));
-            if (nt <= 0 || llama_tokenize(vocab, text.data(), (int) text.size(), toks.data(), nt, true, true) < 0)
-                throw std::runtime_error("tokenization failed");
+            if (toks.empty()) throw std::runtime_error("empty prompt");
             const int max_tokens = (int) num("max_tokens", 256);
             if ((int) toks.size() + max_tokens > a.ctx)
                 throw std::runtime_error("prompt of " + std::to_string(toks.size()) + " tokens plus max_tokens " +
                                          std::to_string(max_tokens) + " exceeds the context of " + std::to_string(a.ctx));
-            std::vector<std::string> stops;
             if (const auto * sv = req.get("stop")) {
-                if (sv->kind == mini_json::Value::STR) stops.push_back(sv->str);
+                if (sv->kind == mini_json::Value::STR && !sv->str.empty()) stops.push_back(sv->str);
                 else if (sv->kind == mini_json::Value::ARR) for (auto & x : sv->arr) if (x.kind == mini_json::Value::STR && !x.str.empty()) stops.push_back(x.str);
             }
             size_t hold = 0;
             for (auto & st : stops) hold = std::max(hold, st.size() - 1);
 
-            // prefix cache: keep the longest shared prefix of the KV, decode the rest
+            // ---- prefix cache: keep the longest shared prefix of the KV, decode the rest
             size_t keep = 0;
             while (keep < kv.size() && keep < toks.size() - 1 && kv[keep] == toks[keep]) keep++;
             if (!llama_memory_seq_rm(mem, 0, (llama_pos) keep, -1)) { llama_memory_clear(mem, true); keep = 0; }
@@ -1163,57 +1181,89 @@ static int serve_main(llama_model * model, llama_model * low, const Args & a) {
             kv.insert(kv.end(), toks.begin() + keep, toks.end());
             auto t1 = clk::now();
 
-            llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-            const double temp = num("temperature", 0.0);
-            if (temp <= 0) {
-                llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
-            } else {
-                const int top_k = (int) num("top_k", 0);
-                if (top_k > 0) llama_sampler_chain_add(smpl, llama_sampler_init_top_k(top_k));
-                const double top_p = num("top_p", 1.0);
-                if (top_p < 1.0) llama_sampler_chain_add(smpl, llama_sampler_init_top_p((float) top_p, 1));
-                llama_sampler_chain_add(smpl, llama_sampler_init_temp((float) temp));
-                llama_sampler_chain_add(smpl, llama_sampler_init_dist((uint32_t) num("seed", 4294967295.0)));
+            // ---- sampling: llama.cpp's common sampler, which also runs the lazy tool-call grammar
+            common_params_sampling sp;
+            sp.temp = (float) num("temperature", 0.0);
+            sp.top_p = (float) num("top_p", 1.0);
+            sp.top_k = (int32_t) num("top_k", 0);
+            sp.min_p = 0.0f;
+            sp.seed = (uint32_t) num("seed", (double) LLAMA_DEFAULT_SEED);
+            if (session) session->apply_sampling(sp);
+            std::unique_ptr<common_sampler, void (*)(common_sampler *)> smpl(common_sampler_init(model, sp), common_sampler_free);
+            if (!smpl) throw std::runtime_error("could not set up sampling (bad grammar?)");
+
+            // what the client sees: the parsed content (chat) or the raw text, minus stop strings
+            auto visible = [&](const std::string & raw, bool partial) -> common_chat_msg {
+                common_chat_msg m;
+                if (!session) { m.content = raw; return m; }
+                try {
+                    return common_chat_parse(common_chat_input(raw), partial, parse_params);
+                } catch (const std::exception &) {
+                    if (!partial) m.content = raw;  // unparseable at the end: hand back the text
+                    return m;
+                }
+            };
+            // Tools offered but no tool-call grammar for this template: hold the content back until
+            // the end, so tool-call markup the model writes in its own way never reaches the
+            // client; banach serve then extracts calls from the final text.
+            bool tool_syntax = true;
+            if (session && body.contains("tools") && body.at("tools").is_array() && body.at("tools").size() > 0) {
+                common_params_sampling probe;
+                session->apply_sampling(probe);
+                tool_syntax = !probe.grammar.grammar.empty();
             }
+            const bool stream_content = tool_syntax;
+            emit("{\"id\":" + idj + ",\"event\":\"meta\",\"tool_syntax\":" + (tool_syntax ? "true" : "false") + "}");
             std::string out;
             size_t emitted = 0;
             std::string finish = "length", stop_hit;
             int n_gen = 0;
             std::vector<llama_token> gen;
-            const std::string idj = mini_json::escape(id);
             while (n_gen < max_tokens) {
                 const float * lg = llama_get_logits_ith(ctx, -1);
                 const int amax = top2(lg, n_vocab).argmax;
-                llama_token t = llama_sampler_sample(smpl, ctx, -1);
+                llama_token t = common_sampler_sample(smpl.get(), ctx, -1);
+                common_sampler_accept(smpl.get(), t, true);
                 if (llama_vocab_is_eog(vocab, t)) { finish = "stop"; break; }
                 gen.push_back(t);
                 n_gen++;
                 out += token_piece(vocab, t);
                 size_t cut = std::string::npos;
                 for (auto & st : stops) {
-                    size_t f = out.find(st, emitted > st.size() ? emitted - st.size() : 0);
+                    size_t f = out.find(st);
                     if (f != std::string::npos && f < cut) { cut = f; stop_hit = st; }
                 }
-                size_t upto;
-                if (cut != std::string::npos) upto = cut;
-                else upto = out.size() > hold ? out.size() - hold : 0;
-                if (upto < emitted) upto = emitted;
-                std::string chunk = out.substr(emitted, upto - emitted);
-                chunk.resize(mini_json::utf8_complete_prefix(chunk));
-                emitted += chunk.size();
+                const std::string raw = cut != std::string::npos ? out.substr(0, cut) : out;
+                const std::string content = visible(raw, cut == std::string::npos).content;
+                size_t upto = cut != std::string::npos ? content.size()
+                                                       : (content.size() > hold ? content.size() - hold : 0);
+                std::string chunk;
+                if (stream_content && upto > emitted && content.compare(0, emitted, content, 0, emitted) == 0) {
+                    chunk = content.substr(emitted, upto - emitted);
+                    chunk.resize(mini_json::utf8_complete_prefix(chunk));
+                    emitted += chunk.size();
+                }
                 emit("{\"id\":" + idj + ",\"event\":\"token\",\"text\":" + mini_json::escape(chunk) +
                      ",\"token\":" + std::to_string(t) + ",\"argmax\":" + std::to_string(amax) + "}");
-                if (cut != std::string::npos) { finish = "stop"; break; }
+                if (cut != std::string::npos) { finish = "stop"; out = raw; break; }
                 if (n_gen >= max_tokens) break;
                 decode(ctx, &t, 1, (int) kv.size(), false);
                 kv.push_back(t);
             }
-            llama_sampler_free(smpl);
-            if (stop_hit.empty() && emitted < out.size()) {
-                // flush what the stop-string hold-back kept
-                emit("{\"id\":" + idj + ",\"event\":\"token\",\"text\":" + mini_json::escape(out.substr(emitted)) +
-                     ",\"token\":-1,\"argmax\":-1}");
+            // ---- final parse: content remainder, tool calls, reasoning
+            const common_chat_msg final_msg = visible(out, false);
+            if (emitted < final_msg.content.size()) {
+                emit("{\"id\":" + idj + ",\"event\":\"token\",\"text\":" +
+                     mini_json::escape(final_msg.content.substr(emitted)) + ",\"token\":-1,\"argmax\":-1}");
             }
+            std::string calls = "[";
+            for (size_t i = 0; i < final_msg.tool_calls.size(); i++) {
+                const auto & tc = final_msg.tool_calls[i];
+                calls += (i ? "," : "") + std::string("{\"id\":") + mini_json::escape(tc.id) + ",\"name\":" +
+                         mini_json::escape(tc.name) + ",\"arguments\":" + mini_json::escape(tc.arguments) + "}";
+            }
+            calls += "]";
+            if (!final_msg.tool_calls.empty()) finish = "tool_calls";
             auto t2 = clk::now();
             std::string all = "[";
             for (size_t i = 0; i < toks.size(); i++) all += (i ? "," : "") + std::to_string(toks[i]);
@@ -1222,6 +1272,8 @@ static int serve_main(llama_model * model, llama_model * low, const Args & a) {
             const double dec = secs(t1, t2);
             emit("{\"id\":" + idj + ",\"event\":\"done\",\"finish_reason\":\"" + finish + "\",\"stop\":" +
                  (stop_hit.empty() ? std::string("null") : mini_json::escape(stop_hit)) +
+                 ",\"tool_calls\":" + calls + ",\"reasoning\":" + mini_json::escape(final_msg.reasoning_content) +
+                 ",\"tool_syntax\":" + (tool_syntax ? "true" : "false") +
                  ",\"prompt_tokens\":" + std::to_string(toks.size()) + ",\"cached_tokens\":" + std::to_string(keep) +
                  ",\"completion_tokens\":" + std::to_string(n_gen) + ",\"prefill_seconds\":" + jnum(secs(t0, t1)) +
                  ",\"decode_seconds\":" + jnum(dec) + ",\"tok_s\":" + jnum(dec > 0 ? n_gen / dec : 0) +

@@ -13,6 +13,7 @@
 
 use crate::fidelity::{Meter, TauController};
 use crate::pull::Puller;
+use crate::tools;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -121,7 +122,7 @@ impl EngineProc {
         loop {
             let ev = self.next_event()?;
             match ev["event"].as_str() {
-                Some("token") => on_event(&ev),
+                Some("token") | Some("meta") => on_event(&ev),
                 Some("error") => return Err(ev["message"].as_str().unwrap_or("engine error").to_string()),
                 _ => return Ok(ev),
             }
@@ -158,10 +159,13 @@ struct App {
     counter: AtomicU64,
 }
 
-/// Messages after API normalisation.
+/// A request after API normalisation (OpenAI-format messages and tools).
 #[derive(Debug)]
 struct Gen {
-    messages: Vec<(String, String)>,
+    messages: Vec<Value>,
+    tools: Vec<Value>,
+    tool_choice: Option<String>,
+    parallel_tool_calls: bool,
     max_tokens: u64,
     temperature: f64,
     top_p: f64,
@@ -183,25 +187,6 @@ fn bad(msg: impl Into<String>) -> ApiError {
     ApiError { status: 400, kind: "invalid_request_error", message: msg.into() }
 }
 
-fn text_of(content: &Value) -> Result<String, ApiError> {
-    match content {
-        Value::String(s) => Ok(s.clone()),
-        Value::Array(parts) => {
-            let mut out = String::new();
-            for p in parts {
-                match p["type"].as_str() {
-                    Some("text") => out.push_str(p["text"].as_str().unwrap_or("")),
-                    Some(t) => return Err(bad(format!("content parts of type {t:?} are not supported"))),
-                    None => return Err(bad("content part without a type")),
-                }
-            }
-            Ok(out)
-        }
-        Value::Null => Ok(String::new()),
-        _ => Err(bad("content must be a string or an array of text parts")),
-    }
-}
-
 fn stops(v: &Value) -> Vec<String> {
     match v {
         Value::String(s) => vec![s.clone()],
@@ -210,34 +195,19 @@ fn stops(v: &Value) -> Vec<String> {
     }
 }
 
-fn reject_tools(body: &Value) -> Result<(), ApiError> {
-    if body.get("tools").map(|t| !t.is_null() && t.as_array().map(|a| !a.is_empty()).unwrap_or(true)).unwrap_or(false)
-        || body.get("functions").is_some()
-    {
-        return Err(bad("tool use is not supported by banach serve yet"));
-    }
-    Ok(())
-}
-
 fn parse_openai(body: &Value, default_model: &str) -> Result<Gen, ApiError> {
-    reject_tools(body)?;
     if body["n"].as_u64().unwrap_or(1) != 1 {
         return Err(bad("only n = 1 is supported"));
     }
     let msgs = body["messages"].as_array().ok_or_else(|| bad("messages is required"))?;
-    let mut messages = vec![];
-    for m in msgs {
-        let role = m["role"].as_str().ok_or_else(|| bad("message without a role"))?;
-        let role = match role {
-            "system" | "developer" => "system",
-            "user" => "user",
-            "assistant" => "assistant",
-            other => return Err(bad(format!("messages with role {other:?} are not supported"))),
-        };
-        messages.push((role.to_string(), text_of(&m["content"])?));
-    }
+    let messages = tools::openai_messages(msgs).map_err(bad)?;
+    let mut tools = tools::openai_tools(body).map_err(bad)?;
+    let tool_choice = tools::openai_tool_choice(&body["tool_choice"], &mut tools);
     Ok(Gen {
         messages,
+        tools,
+        tool_choice,
+        parallel_tool_calls: body["parallel_tool_calls"].as_bool().unwrap_or(true),
         max_tokens: body["max_completion_tokens"].as_u64().or(body["max_tokens"].as_u64()).unwrap_or(512),
         temperature: body["temperature"].as_f64().unwrap_or(1.0),
         top_p: body["top_p"].as_f64().unwrap_or(1.0),
@@ -250,24 +220,13 @@ fn parse_openai(body: &Value, default_model: &str) -> Result<Gen, ApiError> {
 }
 
 fn parse_anthropic(body: &Value, default_model: &str) -> Result<Gen, ApiError> {
-    reject_tools(body)?;
     let max_tokens = body["max_tokens"].as_u64().ok_or_else(|| bad("max_tokens is required"))?;
-    let mut messages = vec![];
-    match &body["system"] {
-        Value::Null => {}
-        s => messages.push(("system".to_string(), text_of(s)?)),
-    }
-    let msgs = body["messages"].as_array().ok_or_else(|| bad("messages is required"))?;
-    for m in msgs {
-        let role = match m["role"].as_str() {
-            Some("user") => "user",
-            Some("assistant") => "assistant",
-            other => return Err(bad(format!("messages with role {other:?} are not supported"))),
-        };
-        messages.push((role.to_string(), text_of(&m["content"])?));
-    }
+    let (messages, tools, tool_choice) = tools::anthropic_request(body).map_err(bad)?;
     Ok(Gen {
         messages,
+        tools,
+        tool_choice,
+        parallel_tool_calls: !body["tool_choice"]["disable_parallel_tool_use"].as_bool().unwrap_or(false),
         max_tokens,
         temperature: body["temperature"].as_f64().unwrap_or(1.0),
         top_p: body["top_p"].as_f64().unwrap_or(1.0),
@@ -287,32 +246,61 @@ fn now() -> u64 {
 
 struct Outcome {
     text: String,
+    tool_calls: Vec<tools::ToolCall>,
     done: Value,
+}
+
+impl Outcome {
+    fn finish(&self) -> &str {
+        if !self.tool_calls.is_empty() {
+            "tool_calls"
+        } else {
+            self.done["finish_reason"].as_str().unwrap_or("stop")
+        }
+    }
 }
 
 impl App {
     fn engine_request(&self, g: &Gen, id: &str) -> Value {
-        let msgs: Vec<Value> = g.messages.iter().map(|(r, c)| json!({"role": r, "content": c})).collect();
         let mut req = json!({
-            "op": "generate", "id": id, "messages": msgs, "max_tokens": g.max_tokens,
+            "op": "generate", "id": id, "messages": g.messages, "max_tokens": g.max_tokens,
             "temperature": g.temperature, "top_p": g.top_p, "top_k": g.top_k, "stop": g.stop,
         });
+        if !g.tools.is_empty() {
+            req["tools"] = Value::Array(g.tools.clone());
+            req["parallel_tool_calls"] = json!(g.parallel_tool_calls);
+            if let Some(c) = &g.tool_choice {
+                req["tool_choice"] = json!(c);
+            }
+        }
         if let Some(s) = g.seed {
             req["seed"] = json!(s);
         }
         req
     }
 
-    /// Run one generation; `on_text` gets every text delta. Runs the shadow replay after.
+    /// Run one generation; `on_text` gets every text delta. Tool calls come back in the
+    /// outcome. When tools are offered, text is held back to the end; calls come from the
+    /// template's native parser, or from the fallback extractor when that finds none. Runs
+    /// the shadow replay after.
     fn generate(&self, g: &Gen, id: &str, mut on_text: impl FnMut(&str)) -> Result<Outcome, String> {
         let mut eng = self.engine.lock().unwrap();
         let mut text = String::new();
+        let mut held = false;
         let mut argmax: Vec<i64> = vec![];
         let done = eng.call(&self.engine_request(g, id), |ev| {
+            if ev["event"] == "meta" {
+                // with tools offered, hold text back: small models often write calls in their
+                // own way, and markup must not leak to the client before it is recognised
+                held = !g.tools.is_empty();
+                return;
+            }
             let t = ev["text"].as_str().unwrap_or("");
             if !t.is_empty() {
                 text.push_str(t);
-                on_text(t);
+                if !held {
+                    on_text(t);
+                }
             }
             if ev["token"].as_i64().unwrap_or(-1) >= 0 {
                 argmax.push(ev["argmax"].as_i64().unwrap_or(-1));
@@ -321,10 +309,40 @@ impl App {
         if done["event"] != "done" {
             return Err(format!("unexpected engine reply {done}"));
         }
+        let mut calls: Vec<tools::ToolCall> = done["tool_calls"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| tools::ToolCall {
+                        id: c["id"].as_str().unwrap_or("").to_string(),
+                        name: c["name"].as_str().unwrap_or("").to_string(),
+                        arguments: c["arguments"].as_str().unwrap_or("{}").to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if held {
+            let (rest, found) = tools::extract_tool_calls(&text, &tools::tool_names(&g.tools));
+            if calls.is_empty() {
+                calls = found;
+            }
+            text = rest;
+            if !text.is_empty() {
+                on_text(&text);
+            }
+        }
+        for (k, c) in calls.iter_mut().enumerate() {
+            if c.id.is_empty() {
+                c.id = format!("call_{}_{k}", id.rsplit('-').next().unwrap_or(id).rsplit('_').next().unwrap_or(id));
+            }
+            if c.arguments.trim().is_empty() {
+                c.arguments = "{}".into();
+            }
+        }
         if self.ladder {
             self.shadow(&mut eng, &done, &argmax);
         }
-        Ok(Outcome { text, done })
+        Ok(Outcome { text, tool_calls: calls, done })
     }
 
     fn shadow(&self, eng: &mut EngineProc, done: &Value, argmax: &[i64]) {
@@ -477,21 +495,43 @@ fn stream_response(req: tiny_http::Request, produce: impl FnOnce(Sender<Vec<u8>>
 }
 
 fn finish_openai(reason: &str) -> &'static str {
-    if reason == "length" {
-        "length"
-    } else {
-        "stop"
+    match reason {
+        "length" => "length",
+        "tool_calls" => "tool_calls",
+        _ => "stop",
     }
 }
 
-fn finish_anthropic(done: &Value) -> (&'static str, Value) {
-    if done["finish_reason"] == "length" {
+fn finish_anthropic(o: &Outcome) -> (&'static str, Value) {
+    if !o.tool_calls.is_empty() {
+        ("tool_use", Value::Null)
+    } else if o.done["finish_reason"] == "length" {
         ("max_tokens", Value::Null)
-    } else if done["stop"].is_string() {
-        ("stop_sequence", done["stop"].clone())
+    } else if o.done["stop"].is_string() {
+        ("stop_sequence", o.done["stop"].clone())
     } else {
         ("end_turn", Value::Null)
     }
+}
+
+fn openai_tool_calls(calls: &[tools::ToolCall]) -> Value {
+    Value::Array(
+        calls
+            .iter()
+            .map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}))
+            .collect(),
+    )
+}
+
+fn tool_input(c: &tools::ToolCall) -> Value {
+    serde_json::from_str::<Value>(&c.arguments)
+        .ok()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn anthropic_tool_id(id: &str) -> String {
+    if id.starts_with("toolu_") { id.to_string() } else { format!("toolu_{id}") }
 }
 
 fn handle_openai(app: Arc<App>, req: tiny_http::Request, body: Value) {
@@ -506,10 +546,14 @@ fn handle_openai(app: Arc<App>, req: tiny_http::Request, body: Value) {
             Ok(o) => {
                 let pt = o.done["prompt_tokens"].as_u64().unwrap_or(0);
                 let ct = o.done["completion_tokens"].as_u64().unwrap_or(0);
+                let mut message = json!({"role": "assistant",
+                    "content": if o.text.is_empty() && !o.tool_calls.is_empty() { Value::Null } else { json!(o.text) }});
+                if !o.tool_calls.is_empty() {
+                    message["tool_calls"] = openai_tool_calls(&o.tool_calls);
+                }
                 respond_json(req, 200, &json!({
                     "id": id, "object": "chat.completion", "created": created, "model": g.model,
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": o.text},
-                                 "finish_reason": finish_openai(o.done["finish_reason"].as_str().unwrap_or("stop"))}],
+                    "choices": [{"index": 0, "message": message, "finish_reason": finish_openai(o.finish())}],
                     "usage": {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct,
                               "prompt_tokens_details": {"cached_tokens": o.done["cached_tokens"]}},
                 }));
@@ -531,7 +575,11 @@ fn handle_openai(app: Arc<App>, req: tiny_http::Request, body: Value) {
         });
         match r {
             Ok(o) => {
-                send(chunk(json!({}), json!(finish_openai(o.done["finish_reason"].as_str().unwrap_or("stop")))));
+                for (k, c) in o.tool_calls.iter().enumerate() {
+                    send(chunk(json!({"tool_calls": [{"index": k, "id": c.id, "type": "function",
+                                                      "function": {"name": c.name, "arguments": c.arguments}}]}), Value::Null));
+                }
+                send(chunk(json!({}), json!(finish_openai(o.finish()))));
                 if include_usage {
                     let pt = o.done["prompt_tokens"].as_u64().unwrap_or(0);
                     let ct = o.done["completion_tokens"].as_u64().unwrap_or(0);
@@ -556,11 +604,17 @@ fn handle_anthropic(app: Arc<App>, req: tiny_http::Request, body: Value) {
     if !g.stream {
         match app.generate(&g, &id, |_| {}) {
             Ok(o) => {
-                let (reason, seq) = finish_anthropic(&o.done);
+                let (reason, seq) = finish_anthropic(&o);
+                let mut content = vec![];
+                if !o.text.is_empty() {
+                    content.push(json!({"type": "text", "text": o.text}));
+                }
+                for c in &o.tool_calls {
+                    content.push(json!({"type": "tool_use", "id": anthropic_tool_id(&c.id), "name": c.name, "input": tool_input(c)}));
+                }
                 respond_json(req, 200, &json!({
                     "id": id, "type": "message", "role": "assistant", "model": g.model,
-                    "content": [{"type": "text", "text": o.text}],
-                    "stop_reason": reason, "stop_sequence": seq,
+                    "content": content, "stop_reason": reason, "stop_sequence": seq,
                     "usage": {"input_tokens": o.done["prompt_tokens"], "output_tokens": o.done["completion_tokens"],
                               "cache_read_input_tokens": o.done["cached_tokens"]},
                 }));
@@ -574,16 +628,38 @@ fn handle_anthropic(app: Arc<App>, req: tiny_http::Request, body: Value) {
         send("message_start", json!({"type": "message_start", "message": {
             "id": id, "type": "message", "role": "assistant", "model": g.model, "content": [],
             "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}));
-        send("content_block_start", json!({"type": "content_block_start", "index": 0,
-                                            "content_block": {"type": "text", "text": ""}}));
+        let mut text_open = false;
         let r = app.generate(&g, &id, |t| {
+            if !text_open {
+                send("content_block_start", json!({"type": "content_block_start", "index": 0,
+                                                    "content_block": {"type": "text", "text": ""}}));
+                text_open = true;
+            }
             send("content_block_delta", json!({"type": "content_block_delta", "index": 0,
                                                 "delta": {"type": "text_delta", "text": t}}));
         });
-        send("content_block_stop", json!({"type": "content_block_stop", "index": 0}));
+        let mut index = 0;
+        if text_open {
+            send("content_block_stop", json!({"type": "content_block_stop", "index": 0}));
+            index = 1;
+        }
         match r {
             Ok(o) => {
-                let (reason, seq) = finish_anthropic(&o.done);
+                for c in &o.tool_calls {
+                    send("content_block_start", json!({"type": "content_block_start", "index": index,
+                        "content_block": {"type": "tool_use", "id": anthropic_tool_id(&c.id), "name": c.name, "input": {}}}));
+                    send("content_block_delta", json!({"type": "content_block_delta", "index": index,
+                        "delta": {"type": "input_json_delta", "partial_json": tool_input(c).to_string()}}));
+                    send("content_block_stop", json!({"type": "content_block_stop", "index": index}));
+                    index += 1;
+                }
+                if index == 0 {
+                    // an empty reply still carries one (empty) text block
+                    send("content_block_start", json!({"type": "content_block_start", "index": 0,
+                                                        "content_block": {"type": "text", "text": ""}}));
+                    send("content_block_stop", json!({"type": "content_block_stop", "index": 0}));
+                }
+                let (reason, seq) = finish_anthropic(&o);
                 send("message_delta", json!({"type": "message_delta",
                     "delta": {"stop_reason": reason, "stop_sequence": seq},
                     "usage": {"input_tokens": o.done["prompt_tokens"], "output_tokens": o.done["completion_tokens"]}}));
@@ -670,10 +746,19 @@ mod tests {
             {"role": "user", "content": [{"type": "text", "text": "hi "}, {"type": "text", "text": "there"}]}],
             "max_tokens": 7, "temperature": 0.2, "stop": "\n"});
         let g = parse_openai(&body, "d").unwrap();
-        assert_eq!(g.messages, vec![("system".into(), "be brief".into()), ("user".into(), "hi there".into())]);
+        assert_eq!(g.messages, vec![json!({"role": "system", "content": "be brief"}), json!({"role": "user", "content": "hi there"})]);
         assert_eq!(g.max_tokens, 7);
         assert_eq!(g.stop, vec!["\n".to_string()]);
-        assert!(!g.stream);
+        assert!(g.tools.is_empty());
+    }
+
+    #[test]
+    fn openai_tools_are_accepted() {
+        let body = json!({"messages": [{"role": "user", "content": "x"}],
+            "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}], "tool_choice": "auto"});
+        let g = parse_openai(&body, "d").unwrap();
+        assert_eq!(g.tools.len(), 1);
+        assert_eq!(g.tool_choice.as_deref(), Some("auto"));
     }
 
     #[test]
@@ -681,7 +766,7 @@ mod tests {
         let body = json!({"model": "m", "max_tokens": 9, "system": [{"type": "text", "text": "sys"}],
                           "messages": [{"role": "user", "content": "q"}], "stop_sequences": ["END"], "stream": true});
         let g = parse_anthropic(&body, "d").unwrap();
-        assert_eq!(g.messages[0], ("system".into(), "sys".into()));
+        assert_eq!(g.messages[0], json!({"role": "system", "content": "sys"}));
         assert_eq!(g.stop, vec!["END".to_string()]);
         assert!(g.stream);
         assert!(parse_anthropic(&json!({"messages": []}), "d").is_err()); // max_tokens required
@@ -689,20 +774,23 @@ mod tests {
 
     #[test]
     fn rejects_what_is_not_supported() {
-        let tools = json!({"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "function"}]});
-        assert!(parse_openai(&tools, "d").unwrap_err().message.contains("tool use"));
         let n2 = json!({"messages": [{"role": "user", "content": "x"}], "n": 2});
         assert!(parse_openai(&n2, "d").is_err());
         let img = json!({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {}}]}]});
         assert!(parse_openai(&img, "d").is_err());
-        let tool_role = json!({"messages": [{"role": "tool", "content": "x"}]});
-        assert!(parse_openai(&tool_role, "d").is_err());
+        let bad_tool = json!({"messages": [{"role": "user", "content": "x"}], "tools": [{"type": "web_search"}]});
+        assert!(parse_openai(&bad_tool, "d").is_err());
     }
 
     #[test]
-    fn anthropic_stop_reasons() {
-        assert_eq!(finish_anthropic(&json!({"finish_reason": "length"})).0, "max_tokens");
-        assert_eq!(finish_anthropic(&json!({"finish_reason": "stop", "stop": "END"})).0, "stop_sequence");
-        assert_eq!(finish_anthropic(&json!({"finish_reason": "stop", "stop": null})).0, "end_turn");
+    fn stop_reasons() {
+        let o = |done: Value, calls: Vec<tools::ToolCall>| Outcome { text: String::new(), tool_calls: calls, done };
+        assert_eq!(finish_anthropic(&o(json!({"finish_reason": "length"}), vec![])).0, "max_tokens");
+        assert_eq!(finish_anthropic(&o(json!({"finish_reason": "stop", "stop": "END"}), vec![])).0, "stop_sequence");
+        assert_eq!(finish_anthropic(&o(json!({"finish_reason": "stop", "stop": null}), vec![])).0, "end_turn");
+        let call = tools::ToolCall { id: "1".into(), name: "f".into(), arguments: "{}".into() };
+        let with_call = o(json!({"finish_reason": "stop"}), vec![call]);
+        assert_eq!(finish_anthropic(&with_call).0, "tool_use");
+        assert_eq!(finish_openai(with_call.finish()), "tool_calls");
     }
 }
