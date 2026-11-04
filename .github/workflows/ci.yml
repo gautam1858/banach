@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# only the newest commit on a branch is tested; older runs are cancelled
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   LLAMA_COMMIT: 9309bf1
   STORIES_URL: https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/stories15M_MOE-Q8_0.gguf
