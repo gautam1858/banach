@@ -7,10 +7,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sponsors/gautam1858"><img src="https://img.shields.io/badge/Sponsor-Banach-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor Banach"></a>
-</p>
-
-<p align="center">
   <a href="brand/video/banach-launch-16x9.mp4">Watch the 44 s film</a> &nbsp;|&nbsp;
   <a href="#install">Install</a> &nbsp;|&nbsp;
   <a href="#60-second-start">60-second start</a> &nbsp;|&nbsp;
@@ -183,13 +179,6 @@ Banach builds on other people's work and says so:
 - Unsloth and AtomicChat: published fidelity tables for DeepSeek V4 quants.
 - Research: Si et al. and Liang et al. on expert locality; SliceMoE, DyMoE and HOBBIT on
   mixed-precision experts; Waudby-Smith and Ramdas on betting confidence sequences.
-
-## Sponsor
-
-Banach is free and open source. If it is useful to you, please
-[sponsor Banach](https://github.com/sponsors/gautam1858): sponsorships fund its development,
-benchmark hardware for the Phase 0 kill checks, and new model support. The Sponsor button at
-the top of this repository page works too.
 
 ## License
 
