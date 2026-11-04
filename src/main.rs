@@ -567,6 +567,10 @@ fn main() -> ExitCode {
             .and_then(|a| cmd_serve(&a)),
         "certify" => parse_args(rest, &["target", "alpha", "min-margin"]).and_then(|a| cmd_certify(&a)),
         "calibrate" => parse_args(rest, &["ctx", "measured", "label", "usage"]).and_then(|a| cmd_calibrate(&a)),
+        "-V" | "--version" | "version" => {
+            println!("banach {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(())

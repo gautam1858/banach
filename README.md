@@ -1,4 +1,17 @@
-<p align="center"><img src="brand/logo-lockup.png" alt="banach" width="640"></p>
+<p align="center">
+  <img src="brand/video/hero.gif" alt="One sphere is cut into pieces and reassembled into two, forming the banach logo" width="800">
+</p>
+
+<p align="center">
+  <b>Run Mixture-of-Experts models bigger than your RAM, with an honest plan before you download and a fidelity meter while you run.</b>
+</p>
+
+<p align="center">
+  <a href="brand/video/banach-launch-16x9.mp4">Watch the 44 s film</a> &nbsp;|&nbsp;
+  <a href="#install">Install</a> &nbsp;|&nbsp;
+  <a href="#60-second-start">60-second start</a> &nbsp;|&nbsp;
+  <a href="docs/VALIDATION.md">Every measured number</a>
+</p>
 
 # Banach
 
@@ -8,6 +21,73 @@ Banach runs very large Mixture-of-Experts models on ordinary machines by keeping
 model on NVMe as a lossless floor, serving most tokens from a hot set in RAM, escalating
 precision only where it matters, and measuring fidelity against the exact model on your own
 traffic. Every prediction comes with a range, and every lossy setting comes with a meter.
+
+## Install
+
+Pick one. Each gives you the `banach` command with its engine.
+
+```bash
+pip install banach
+```
+
+```bash
+npm install -g banach
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gautam1858/banach/main/install.sh | sh
+```
+
+```bash
+docker run --rm -p 8080:8080 -v banach:/data ghcr.io/gautam1858/banach --help
+```
+
+```bash
+cargo install banach
+```
+
+Prebuilt binaries: Linux x86_64 (AVX2 or newer), Linux arm64, macOS on Apple Silicon
+(experimental). `cargo install` builds the planner, downloader and server; the inference
+engine comes with the other channels or [from source](#build-from-source).
+
+## 60-second start
+
+1. Ask before you download. This reads a few MB of headers, not 155 GB of weights:
+
+   ```bash
+   banach plan hf:unsloth/DeepSeek-V4-Flash-GGUF/UD-Q4_K_XL/DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf
+   ```
+
+2. Serve a model with an OpenAI and Anthropic compatible API. `--lazy` starts answering
+   while the rest of the file is still downloading:
+
+   ```bash
+   banach serve hf:QuantFactory/granite-3.1-1b-a400m-instruct-GGUF/granite-3.1-1b-a400m-instruct.Q8_0.gguf --lazy
+   ```
+
+3. Talk to it from anything that speaks OpenAI or Anthropic:
+
+   ```python
+   from openai import OpenAI
+   client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="local")
+   print(client.chat.completions.create(
+       model="local", messages=[{"role": "user", "content": "Hello!"}]).choices[0].message.content)
+   ```
+
+   ```python
+   import anthropic
+   client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="local")
+   print(client.messages.create(
+       model="local", max_tokens=200, messages=[{"role": "user", "content": "Hello!"}]).content[0].text)
+   ```
+
+   ```bash
+   curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
+     -d '{"model":"local","messages":[{"role":"user","content":"Hello!"}],"stream":true}'
+   ```
+
+4. Watch it: `http://127.0.0.1:8080/banach/status` shows the engine, the fidelity meter and
+   download progress.
 
 ## What works today
 
@@ -25,44 +105,21 @@ Measured numbers, with machine, model, quant and command for each, are in
 [docs/VALIDATION.md](docs/VALIDATION.md). The DeepSeek V4 Flash headline still needs the
 Phase 0 kill checks on a machine with 128 GB or more (SPEC-DERISK section 6).
 
-## Quick start
+## Build from source
 
 ```bash
+git clone https://github.com/gautam1858/banach && cd banach
 cargo build --release
-git clone https://github.com/ggml-org/llama.cpp && (cd llama.cpp && git checkout 9309bf1 && git apply ../engine/patches/0001-banach-precision-ladder.patch)
-cmake -S engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/llama.cpp && ninja -C build-engine banach-engine
+git clone https://github.com/ggml-org/llama.cpp ../llama.cpp
+(cd ../llama.cpp && git checkout 9309bf1 && git apply ../banach/engine/patches/0001-banach-precision-ladder.patch)
+cmake -S engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/../llama.cpp
+ninja -C build-engine banach-engine
 export BANACH_ENGINE=$PWD/build-engine/banach-engine
+./target/release/banach --help
 ```
 
-Will it run, and how fast, before downloading anything:
-
-```bash
-./target/release/banach probe
-./target/release/banach plan hf:unsloth/DeepSeek-V4-Flash-GGUF/UD-Q4_K_XL/DeepSeek-V4-Flash-UD-Q4_K_XL-00001-of-00005.gguf --min-tok-s 10
-```
-
-Serve a model (downloaded first, or while downloading with `--lazy`):
-
-```bash
-./target/release/banach serve hf:QuantFactory/granite-3.1-1b-a400m-instruct-GGUF/granite-3.1-1b-a400m-instruct.Q8_0.gguf --lazy
-```
-
-Then point any OpenAI or Anthropic client at it:
-
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
-  -d '{"model":"local","messages":[{"role":"user","content":"Hello"}],"stream":true}'
-```
-
-- OpenAI SDKs: `base_url="http://127.0.0.1:8080/v1"`, any API key
-- Anthropic SDKs: `base_url="http://127.0.0.1:8080"`, any API key
-- `GET /banach/status`: engine, ladder threshold, fidelity meter, download progress
-
-With a precision ladder and a live fidelity meter:
-
-```bash
-./target/release/banach serve model-Q8_0.gguf --ladder model-Q4_K_M.gguf --tau 7 --target 0.01
-```
+A source build tunes the engine for your CPU (`-march=native`), which is faster than the
+portable prebuilt binaries.
 
 ## Commands
 
@@ -102,6 +159,8 @@ With a precision ladder and a live fidelity meter:
 | `tracer/` | `banach-trace`, the routing tracer |
 | `phase0/` | Phase 0 analysis in Python: cache simulator, entropy floor, eps profiler, certificates |
 | `bench/` | reproducible benchmark script (one JSON per run) |
+| `brand/` | logo, launch film and its source (render it yourself: `brand/README.md`) |
+| `python/`, `npm/`, `install.sh`, `Dockerfile` | packaging; releases are built by `.github/workflows/release.yml` |
 | `phase1/machines/` | reference hardware profiles for `banach plan --hw` |
 
 ## Credits

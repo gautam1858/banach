@@ -5,6 +5,14 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Run very large MoE models on ordinary machines, with an honest plan and a measured fidelity contract"
 rust-version = "1.75"
+authors = ["Gautam"]
+repository = "https://github.com/gautam1858/banach"
+homepage = "https://github.com/gautam1858/banach"
+readme = "README.md"
+keywords = ["llm", "moe", "inference", "gguf", "llama"]
+categories = ["command-line-utilities", "science"]
+# keep the crate small: sources, docs and the patch only
+include = ["/src/**/*.rs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/docs/VALIDATION.md", "/docs/spec/*.md", "/engine/patches/*"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

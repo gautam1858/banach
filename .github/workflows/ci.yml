@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  LLAMA_COMMIT: 9309bf1
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+      - run: cargo package --no-verify
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy pytest
+      - run: cd phase0 && pytest -q
+
+  engine:
+    # build against the pinned llama.cpp with the ladder patch, then prove streaming is
+    # byte-identical to stock llama.cpp on a small MoE
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: llama.cpp with the ladder patch
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp ../llama.cpp
+          cd ../llama.cpp && git checkout $LLAMA_COMMIT
+          git apply ../banach/engine/patches/0001-banach-precision-ladder.patch
+      - name: build engine and tracer
+        run: |
+          cmake -S engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/../llama.cpp -DBANACH_PORTABLE=ON
+          ninja -C build-engine banach-engine
+          cmake -S tracer -B build-trace -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/../llama.cpp
+          ninja -C build-trace banach-trace
+      - name: byte-exact streaming oracle
+        run: |
+          curl -fsSL -o stories.gguf https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/stories15M_MOE-Q8_0.gguf
+          echo "c7aa6863f9a4b3cdf19716e2c95622dcbd3bd06989324bf1ac8e60486ef8e881  stories.gguf" | sha256sum -c
+          echo "Once upon a time there was a robot who" > prompt.txt
+          engine/exact_check.sh build-engine/banach-engine stories.gguf prompt.txt 16

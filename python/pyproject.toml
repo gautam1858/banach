@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "banach"
+version = "0.1.0"
+description = "Run very large Mixture-of-Experts models on ordinary machines, with an honest plan and a measured fidelity contract"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+authors = [{ name = "Gautam" }]
+keywords = ["llm", "moe", "mixture-of-experts", "inference", "llama.cpp", "gguf", "local-ai"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Rust",
+  "Programming Language :: C++",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/gautam1858/banach"
+Source = "https://github.com/gautam1858/banach"
+Issues = "https://github.com/gautam1858/banach/issues"
+
+[project.scripts]
+banach = "banach._cli:main"
+
+[tool.setuptools.package-data]
+banach = ["bin/*"]

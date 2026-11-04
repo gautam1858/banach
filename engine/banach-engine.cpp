@@ -48,6 +48,9 @@
 #include <unordered_map>
 #include <vector>
 
+// Linux has the fast paths (readahead, MADV_POPULATE_READ, MADV_PAGEOUT, fadvise). Other
+// POSIX systems (macOS) fall back to MADV_WILLNEED plus touching one byte per page, and to
+// MADV_DONTNEED for eviction, which makes the budget a soft one there.
 #ifndef MADV_PAGEOUT
 #define MADV_PAGEOUT 21
 #endif
@@ -235,7 +238,11 @@ struct Engine {
             uint8_t * a; size_t len;
             aligned_outer(s.ptr, s.bytes, a, len);
             vec.resize(len / PAGE);
+#if defined(__linux__)
             if (mincore(a, len, vec.data()) != 0) return -1;
+#else
+            if (mincore(a, len, (char *) vec.data()) != 0) return -1;
+#endif
             for (unsigned char c : vec) present += c & 1;
             total += vec.size();
         }
@@ -244,8 +251,13 @@ struct Engine {
 
     static void drop(const Slice & s, bool pageout) {
         uint8_t * a; size_t len;
+#if defined(__linux__)
         if (aligned_inner(s.ptr, s.bytes, a, len)) madvise(a, len, pageout ? MADV_PAGEOUT : MADV_DONTNEED);
         posix_fadvise(s.fd, (off_t) s.file_off, (off_t) s.bytes, POSIX_FADV_DONTNEED);
+#else
+        (void) pageout;
+        if (aligned_inner(s.ptr, s.bytes, a, len)) madvise(a, len, MADV_DONTNEED);
+#endif
     }
 
     void evict(const Expert & x) {
@@ -261,12 +273,19 @@ struct Engine {
 
     static void fetch_one(const Slice & s) {
         // Whole-slice read into the page cache (no copy), then map it in one call.
+        uint8_t * a; size_t len;
+        aligned_outer(s.ptr, s.bytes, a, len);
+#if defined(__linux__)
         if (readahead(s.fd, (off64_t) s.file_off, s.bytes) != 0) {
             posix_fadvise(s.fd, (off_t) s.file_off, (off_t) s.bytes, POSIX_FADV_WILLNEED);
         }
-        uint8_t * a; size_t len;
-        aligned_outer(s.ptr, s.bytes, a, len);
         madvise(a, len, MADV_POPULATE_READ);
+#else
+        madvise(a, len, MADV_WILLNEED);
+        volatile uint8_t sink = 0;
+        for (size_t o = 0; o < len; o += PAGE) sink ^= a[o];  // fault the pages in
+        (void) sink;
+#endif
     }
 
     void touch(int64_t key) {
@@ -417,6 +436,8 @@ struct Engine {
         return n;
     }
 };
+
+static std::string token_piece(const llama_vocab * vocab, llama_token t);
 
 static std::vector<int> read_ids(const ggml_tensor * t) {
     std::vector<int> out;
@@ -1312,6 +1333,14 @@ int main(int argc, char ** argv) {
                     a.cold ? "cold" : "warm",
                     warmed ? (", warm-started " + std::to_string(warmed) + " experts").c_str() : "");
             RunResult r = run(model, prompt, a, &E);
+            {
+                // the generated text on stdout; statistics stay on stderr
+                std::string outtext;
+                for (llama_token t : r.tokens) outtext += token_piece(vocab, t);
+                fwrite(outtext.data(), 1, outtext.size(), stdout);
+                fputc('\n', stdout);
+                fflush(stdout);
+            }
             const double tps = r.tokens.size() / r.decode_s;
             fprintf(stderr, "%s: prefill %d tok %.2f s; decode %zu tok %.2f tok/s, hit %.1f%% (page cache %.1f%%), "
                             "disk %.1f MB/token, fetch %.2f s, evict %.2f s, callback %.2f s\n",
