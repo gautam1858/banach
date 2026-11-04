@@ -31,10 +31,15 @@ Qwen3.6-35B-A3B (Q4_K_M, 22.1 GB) on a 4-core cloud VM with 16 GB of RAM, no swa
 
 | | stock llama.cpp | **Banach** | |
 |---|---:|---:|---|
+| Default settings | **crashed: out of memory** | **runs** | llama.cpp copies the weights into RAM; Banach streams them |
+| Model size vs RAM | | **138%** | 22.1 GB of model, 16 GB of RAM, no swap |
 | Prompt processing | 7.64 s | **3.44 s** | **2.2x faster** |
-| Generation | 4.89 tok/s | **5.40 tok/s** | **+10%** |
+| Generation | 4.89 tok/s | **5.40 tok/s** | **+10%**, on a 4-core VM |
 | RAM for experts | all it can take | **10 GB, capped** | the rest of your machine stays usable |
 | Output | reference | **identical** | every token, every logit, bit for bit |
+| Read before you know the speed | the whole 22 GB | **16 MB** | `banach plan` reads 0.07% of the file |
+
+The stock llama.cpp speed rows are with weight repacking turned off, the only way it runs here.
 
 Squeeze the RAM budget further and race llama.cpp paging experts in at that same budget: **2.1x faster generation** ([details](docs/VALIDATION.md)).
 
