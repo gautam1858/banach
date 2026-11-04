@@ -1,5 +1,6 @@
 //! banach: weights-free preflight, hardware probe and planner (Phase 1).
 
+mod catalog;
 mod fidelity;
 mod gguf;
 mod mckp;
@@ -26,6 +27,9 @@ usage:
       (--ctx is the context length decode runs at; attention cost grows with it)
       preflight card: predicted speed and fidelity per plan, before downloading weights
       (--hw plans for another machine from its saved hardware.json)
+  banach pick [MODEL ...] [--hw FILE] [--ctx N] [--min-tok-s X] [--json]
+      rank models by the speed predicted for this machine, biggest model that is fast enough first
+      (no MODEL: the built-in list of large open MoE models; only headers are read)
   banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--gpu-layers N] [--exact-check]
       plan, then decode with banach-engine using the planned RAM budget for routed experts
       (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
@@ -308,6 +312,114 @@ fn cmd_plan(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_pick(a: &Args) -> Result<(), String> {
+    let hw = match a.flags.get("hw") {
+        Some(p) => load_json::<Hardware>(Path::new(p)).ok_or_else(|| format!("{p}: not a hardware profile"))?,
+        None => hardware(&home().join("hardware.json"))?,
+    };
+    let c = constraints(a)?;
+    let candidates: Vec<(String, String)> = if a.pos.is_empty() {
+        catalog::MODELS.iter().map(|(l, s)| (l.to_string(), s.to_string())).collect()
+    } else {
+        a.pos.iter().map(|s| (s.clone(), s.clone())).collect()
+    };
+
+    struct Row {
+        label: String,
+        params: u64,
+        size: u64,
+        tok_s: f64,
+        low: f64,
+        high: f64,
+    }
+    // header reads are network-bound, so read them side by side
+    let results: Vec<(String, Result<Row, String>)> = std::thread::scope(|sc| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|(label, spec)| {
+                let (hw, c) = (&hw, &c);
+                sc.spawn(move || {
+                    let row = load_model(spec).and_then(|l| {
+                        let cal = load_json::<Calibration>(&cal_path(&l.profile))
+                            .or_else(|| load_json::<Calibration>(&home().join("calibration.json")))
+                            .unwrap_or_default();
+                        let r = planner::plan(&l.profile, hw, c, &cal);
+                        let exact = r.plans.iter().find(|p| p.lossless).ok_or_else(|| r.verdict.clone())?;
+                        Ok(Row {
+                            label: label.clone(),
+                            params: l.profile.params,
+                            size: l.profile.total_bytes,
+                            tok_s: exact.tok_s.mid,
+                            low: exact.tok_s.low,
+                            high: exact.tok_s.high,
+                        })
+                    });
+                    (label.clone(), row)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| ("?".into(), Err("worker panicked".into())))).collect()
+    });
+
+    let mut rows = Vec::new();
+    for (label, r) in results {
+        match r {
+            Ok(row) => rows.push(row),
+            Err(e) => eprintln!("skipped {label}: {e}"),
+        }
+    }
+    // models that meet the target, biggest first; then the rest, fastest first
+    let (mut fast, mut slow): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.tok_s >= c.min_tok_s);
+    fast.sort_by(|x, y| y.params.cmp(&x.params));
+    slow.sort_by(|x, y| y.tok_s.partial_cmp(&x.tok_s).unwrap_or(std::cmp::Ordering::Equal));
+
+    if a.switches.contains("json") {
+        let to_json = |r: &Row, ok: bool| {
+            serde_json::json!({"model": r.label, "params": r.params, "bytes": r.size, "tok_s": r.tok_s,
+                "tok_s_low": r.low, "tok_s_high": r.high, "meets_target": ok})
+        };
+        let all: Vec<_> = fast.iter().map(|r| to_json(r, true)).chain(slow.iter().map(|r| to_json(r, false))).collect();
+        println!("{}", serde_json::to_string_pretty(&all).unwrap());
+        return Ok(());
+    }
+    println!(
+        "machine: {}, {} RAM, {} memory bandwidth, {} disk",
+        hw.cpu,
+        gb(hw.ram_available as f64),
+        format!("{:.0} GB/s", hw.mem_bw / 1e9),
+        hw.disk_bw.map(|d| format!("{:.1} GB/s", d / 1e9)).unwrap_or_else(|| "unmeasured".into())
+    );
+    println!("exact weights only; speeds are predictions from headers (ctx {}), target {:.1} tok/s\n", c.ctx, c.min_tok_s);
+    let print = |title: &str, rows: &[Row]| {
+        println!("{title}");
+        if rows.is_empty() {
+            println!("  (none)\n");
+            return;
+        }
+        println!("  {:<34} {:>8} {:>9} {:>11}   {}", "model", "params", "on disk", "tok/s", "range");
+        for r in rows {
+            println!(
+                "  {:<34} {:>7.0}B {:>9} {:>11.1}   {:.1} to {:.1}",
+                r.label,
+                r.params as f64 / 1e9,
+                gb(r.size as f64),
+                r.tok_s,
+                r.low,
+                r.high
+            );
+        }
+        println!();
+    };
+    print(&format!("Fast enough (at least {:.1} tok/s), biggest first:", c.min_tok_s), &fast);
+    print("Runs, but slower than the target, fastest first:", &slow);
+    if let Some(best) = fast.first() {
+        println!("Pick: {}. Try it: banach serve <its hf: file> --lazy", best.label);
+    } else if let Some(best) = slow.first() {
+        println!("Nothing reaches the target. Fastest is {} at {:.1} tok/s.", best.label, best.tok_s);
+    }
+    Ok(())
+}
+
 fn cmd_calibrate(a: &Args) -> Result<(), String> {
     let spec = a.pos.first().ok_or("calibrate needs a MODEL")?;
     let measured: f64 = num(a, "measured", 0.0)?;
@@ -568,6 +680,7 @@ fn main() -> ExitCode {
         "probe" => parse_args(rest, &["disk", "mem-mb"]).and_then(|a| cmd_probe(&a)),
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
+        "pick" => parse_args(rest, &["ctx", "min-tok-s", "hw"]).and_then(|a| cmd_pick(&a)),
         "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb", "gpu-layers"]).and_then(|a| cmd_run(&a)),
         "pull" => parse_args(rest, &["out", "usage", "workers"]).and_then(|a| cmd_pull(&a)),
         "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "gpu-layers", "budget-mb", "ladder", "eps", "tau", "target",

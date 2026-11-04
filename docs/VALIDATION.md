@@ -38,6 +38,24 @@ banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode M
   machine the process was killed for running out of memory at 13.9 GB resident. The engine
   now turns repacking off (`--no-repack` in llama.cpp terms).
 
+## Where decode time goes on the 22 GB model (is prefetch worth building?)
+
+Same run as "Bigger than RAM" above: `--mode banach --budget-mb 10000`, 256 tokens, cold start,
+commit c3daa34 (engine JSON `long_q36_banach.json`).
+
+| Part of decode | Seconds | Share of 47.42 s |
+|---|---:|---:|
+| Waiting on expert fetches (critical path) | 6.68 | 14.1% |
+| Fetch plus admission and eviction bookkeeping (callback) | 7.47 | 15.7% |
+| Everything else (compute) | 39.95 | 84.3% |
+
+Expert hit rate 95.7%; 23.7 MB read from disk per token. The most that perfect next-layer
+prefetch could save is the fetch wait, about 14 to 16% of decode, and published fine-grained
+MoE results report recall of 65 to 80% and gains of 0 to 5% once reads are asynchronous. Below
+the 20% bar chosen for building a predictor, so no predictor is built; compute, not disk, is
+the bottleneck at this size. On a machine where the model is a larger multiple of RAM the
+split will shift: re-measure there before revisiting.
+
 ## Planner table in the README ("Which model on my machine?")
 
 `banach plan MODEL --hw PROFILE`, commit after c3daa34, Exact plan (lossless weights), default
