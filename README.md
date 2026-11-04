@@ -46,6 +46,7 @@ two. More model than your machine should hold.
 | Claim | Status | Evidence |
 |---|---|---|
 | Byte-identical to stock llama.cpp while streaming | measured, every configuration tested | [VALIDATION, Phase 2](docs/VALIDATION.md) |
+| Runs a 22 GB MoE (Qwen3.6-35B-A3B) on a 16 GB machine, 10% faster decode and 2.2x faster prefill than stock llama.cpp, byte-identical | measured, 4-core VM, 1.27 GB/s disk | [VALIDATION, Bigger than RAM](docs/VALIDATION.md) |
 | 2.1x faster than llama.cpp page-faulting experts in, at the same RAM budget | measured on a 1B MoE, 1 GB/s disk | [VALIDATION, Phase 2](docs/VALIDATION.md) |
 | Planner within +-30% of measured speed | measured on held-out runs, small models | [VALIDATION, Phase 1](docs/VALIDATION.md) |
 | Low-precision experts flip only near-tied tokens at a 21.6% low share | measured on a 1B MoE; not yet certified below 1% | [VALIDATION, Phase 3](docs/VALIDATION.md) |

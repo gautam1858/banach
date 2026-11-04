@@ -3,6 +3,41 @@
 Every number here states the machine, model, quant, commit and command, per
 BANACH-SPEC section 7 (non-negotiable 4).
 
+## Bigger than RAM: Qwen3.6-35B-A3B (22.1 GB) on a 16 GB machine
+
+Machine: 4-thread Xeon @ 2.1 GHz VM, 16.9 GB RAM, no swap, 19.7 GB/s memory, disk 1.27 GB/s
+(random 8 MiB O_DIRECT reads, `banach probe`). Model: unsloth Qwen3.6-35B-A3B-UD-Q4_K_M
+(22.1 GB, 40 MoE layers x 256 experts, top-8). Commit c3daa34, llama.cpp 9309bf1 + ladder
+patch. Every run starts cold (the whole file dropped from the page cache), greedy decode,
+`-c 2048 -t 4`, CPU weight repacking off in all modes.
+
+```
+banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode MODE [--budget-mb 10000]
+```
+
+| Run | Mode | Prefill | Decode | Expert hit | Disk per token |
+|---|---|---|---|---|---|
+| 13-token prompt, 32 tokens | stock llama.cpp (mmap, no budget) | 9.32 s | 3.54 tok/s | - | - |
+| | naive, 10 GB expert budget | 6.41 s | 2.44 tok/s | 83.2% | 129.1 MB |
+| | banach, 10 GB expert budget | 3.49 s | 3.98 tok/s | 83.2% | 90.3 MB |
+| 18-token prompt, 256 tokens | stock llama.cpp (mmap, no budget) | 7.64 s | 4.89 tok/s | - | - |
+| | naive, 10 GB expert budget | 5.27 s | 4.87 tok/s | 95.7% | 29.1 MB |
+| | banach, 10 GB expert budget | 3.44 s | 5.40 tok/s | 95.7% | 23.7 MB |
+
+- Byte-exact: `--mode banach --budget-mb 10000 --exact-check -n 64` PASS, 64 tokens with
+  logits bit-equal to stock llama.cpp at every step.
+- Banach is 10 to 12% faster than stock llama.cpp at decode and 2.2 to 2.7x faster at
+  prefill, while holding routed experts to a 10 GB budget; stock llama.cpp is free to use the
+  whole page cache.
+- Planner (uncalibrated, generic hit curve): Exact 2.11 tok/s (1.87 to 2.35). Measured
+  steady-state decode is 5.40 tok/s, outside the range: the generic hit curve predicted 90%
+  hits at this budget, the run reached 95.7%, and the run is short enough that disk traffic
+  falls off as the hot set fills. Fitting this run with `banach calibrate` is the next step.
+- Found on the way: with llama.cpp's default CPU weight repacking (Q4_K to q4_K_8x8 on
+  AVX2), the routed experts are copied out of the mapping into anonymous memory; on this
+  machine the process was killed for running out of memory at 13.9 GB resident. The engine
+  now turns repacking off (`--no-repack` in llama.cpp terms).
+
 ## Phase 1: planner predicted vs measured
 
 Machine: cloud VM, Intel Xeon @ 2.80 GHz, 4 threads, AVX-512, 16.9 GB RAM.
