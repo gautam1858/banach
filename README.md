@@ -15,12 +15,49 @@
 
 # Banach
 
-> Banach-Tarski for language models: more model than your machine should hold.
+**Run Mixture-of-Experts models bigger than your RAM, and know what it will cost before you
+download a byte.**
 
-Banach runs very large Mixture-of-Experts models on ordinary machines by keeping the exact
-model on NVMe as a lossless floor, serving most tokens from a hot set in RAM, escalating
-precision only where it matters, and measuring fidelity against the exact model on your own
-traffic. Every prediction comes with a range, and every lossy setting comes with a meter.
+When a model does not fit, plain `llama.cpp` falls back on the operating system: the file is
+memory-mapped and the kernel pages experts in on demand, 4 KB at a time, with no idea which
+experts the router is about to use. Banach replaces that with a scheduler that knows the
+model:
+
+1. **Predict first.** `banach plan hf:...` reads a few MB of GGUF headers and predicts
+   tokens per second for your machine, with a range, plus how the model splits across VRAM,
+   RAM and NVMe. Predictions landed within +-30% of measurements on held-out runs.
+2. **Stream experts on purpose.** The exact weights stay on disk, untouched. Banach keeps a
+   RAM budget for routed experts, fetches whole experts in parallel the moment the router
+   picks them, and admits only experts that are used often enough to deserve the space.
+   Output stays byte-identical to stock llama.cpp.
+3. **Measure every shortcut.** Optional lower-precision copies of cold experts speed things
+   up; when they are on, Banach replays responses against the exact model and keeps an
+   anytime-valid confidence bound on how often the top token changes.
+
+The name is the Banach-Tarski paradox: one ball, cut into pieces and reassembled, becomes
+two. More model than your machine should hold.
+
+### Measured so far, and what is still a projection
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Byte-identical to stock llama.cpp while streaming | measured, every configuration tested | [VALIDATION, Phase 2](docs/VALIDATION.md) |
+| 2.1x faster than llama.cpp page-faulting experts in, at the same RAM budget | measured on a 1B MoE, 1 GB/s disk | [VALIDATION, Phase 2](docs/VALIDATION.md) |
+| Planner within +-30% of measured speed | measured on held-out runs, small models | [VALIDATION, Phase 1](docs/VALIDATION.md) |
+| Low-precision experts flip only near-tied tokens at a 21.6% low share | measured on a 1B MoE; not yet certified below 1% | [VALIDATION, Phase 3](docs/VALIDATION.md) |
+| DeepSeek V4 Flash (284B) speeds on 32 GB and 64 GB + GPU machines | **projection** from the planner, not measured | [VALIDATION, Phase 1](docs/VALIDATION.md) |
+
+### Why not mmap, `-ot` overrides, KTransformers or ik_llama.cpp?
+
+They are good tools and Banach builds on llama.cpp's kernels. The difference is what happens
+when the model is larger than memory:
+
+- **llama.cpp with mmap** (and `-ot` tensor overrides) leaves the spill to the kernel's page
+  cache, which knows nothing about experts, routing or which bytes matter next.
+- **KTransformers** and **ik_llama.cpp** make CPU/GPU hybrid inference fast when the weights
+  fit in RAM plus VRAM; past that point they also rely on the operating system.
+- **Banach** is built for the past-that-point case: an expert-aware RAM budget over an exact
+  copy on NVMe, a prediction before you download, and a meter for every lossy shortcut.
 
 ## Install
 

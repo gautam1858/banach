@@ -106,6 +106,21 @@ Findings:
    protocol expects 14k to 25k tokens to certify below 1%; the certificate needs a longer
    evaluation run, not a looser threshold.
 
+Where the flips happen. Flip rate by the exact model's top-1/top-2 margin (nats), 4,096
+tokens (197 / 651 / 624 / 765 / 1,859 tokens per band):
+
+| configuration | margin < 0.1 | 0.1 to 0.5 | 0.5 to 1 | 1 to 2 | > 2 | all |
+|---|---|---|---|---|---|---|
+| Q4_K_M, gate only, tau 7 (21.6% low) | 36.0% | 4.9% | 0.0% | 0.0% | 0.0% | 2.51% |
+| Q4_K_M, gate only, tau 14 (65.7% low) | 46.7% | 14.9% | 2.6% | 0.3% | 0.0% | 5.05% |
+| Q4_K_M, every slot low | 50.8% | 22.6% | 6.6% | 0.4% | 0.0% | 7.10% |
+| Q3_K_M, every slot low | 53.8% | 38.9% | 18.6% | 6.5% | 0.6% | 13.09% |
+
+At the best setting every flip is on a token where the exact model's top two choices were
+within 0.5 nats (a probability ratio below 1.65); no token with a larger margin changed. As
+more slots go low precision, flips reach more confident tokens. Near-ties can still be
+meaningful branch points in code or reasoning, so task-level evaluations remain to be done.
+
 The Rust meter (`banach certify`) reproduces the Python reference certificate exactly on a
 fixed sequence. The PI controller on log tau converges below budget in simulation, but only
 with control windows of thousands of tokens: with 500-token windows the bound can never fall
