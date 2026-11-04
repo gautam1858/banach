@@ -164,7 +164,7 @@ portable prebuilt binaries.
 | `phase0/` | Phase 0 analysis in Python: cache simulator, entropy floor, eps profiler, certificates |
 | `bench/` | reproducible benchmark script (one JSON per run) |
 | `brand/` | logo, launch film and its source (render it yourself: `brand/README.md`) |
-| `python/`, `npm/`, `install.sh`, `Dockerfile` | packaging; releases are built by `.github/workflows/release.yml` |
+| `python/`, `npm/`, `install.sh`, `Dockerfile` | packaging; releases are built by `.github/workflows/release.yaml` |
 | `phase1/machines/` | reference hardware profiles for `banach plan --hw` |
 
 ## Credits

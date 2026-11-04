@@ -1,13 +1,13 @@
 # Releasing
 
-A release is one tag. `.github/workflows/release.yml` builds Linux x86_64, Linux arm64 and
+A release is one tag. `.github/workflows/release.yaml` builds Linux x86_64, Linux arm64 and
 macOS arm64 binaries, then publishes to GitHub Releases, PyPI, npm, crates.io and GHCR.
 
 ## One-time setup
 
 1. **PyPI** (no secret): on pypi.org, Account settings, Publishing, add a pending trusted
    publisher: project `banach`, owner `gautam1858`, repository `banach`, workflow
-   `release.yml`, environment `pypi`. In the GitHub repository create an environment named
+   `release.yaml`, environment `pypi`. In the GitHub repository create an environment named
    `pypi` (Settings, Environments).
 2. **npm**: create an automation token on npmjs.com and add it as the repository secret
    `NPM_TOKEN` (Settings, Secrets and variables, Actions). The packages published are
