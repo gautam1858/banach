@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0f1a"/>
+      <stop offset="1" stop-color="#1a1340"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.3" r="0.6">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="960" height="430" rx="22" fill="url(#bg)"/>
+  <rect width="960" height="430" rx="22" fill="url(#glow)"/>
+
+  <text x="480" y="58" fill="#a5b4fc" font-size="15" font-weight="700" letter-spacing="4" text-anchor="middle">KIMI K2 ON A DESKTOP</text>
+
+  <text x="480" y="150" fill="url(#hot)" font-size="86" font-weight="800" text-anchor="middle" letter-spacing="-1">1,000,000,000,000</text>
+  <text x="480" y="188" fill="#e6edf3" font-size="22" font-weight="600" text-anchor="middle">parameters</text>
+
+  <!-- three stats -->
+  <g text-anchor="middle">
+    <rect x="60" y="226" width="260" height="120" rx="16" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.12"/>
+    <text x="190" y="290" fill="#ffffff" font-size="50" font-weight="800">64 GB</text>
+    <text x="190" y="322" fill="#8b949e" font-size="16">of RAM</text>
+
+    <rect x="350" y="226" width="260" height="120" rx="16" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.12"/>
+    <text x="480" y="290" fill="#ffffff" font-size="50" font-weight="800">1 GPU</text>
+    <text x="480" y="322" fill="#8b949e" font-size="16">RTX 5080, 16 GB</text>
+
+    <rect x="640" y="226" width="260" height="120" rx="16" fill="url(#hot)" fill-opacity="0.9"/>
+    <text x="770" y="290" fill="#ffffff" font-size="50" font-weight="800">3.6 tok/s</text>
+    <text x="770" y="322" fill="#eef2ff" font-size="16">lossless streaming</text>
+  </g>
+
+  <text x="480" y="388" fill="#c9d1d9" font-size="17" font-weight="600" text-anchor="middle">382 GB model. 64 GB of memory. Experts streamed from NVMe on demand.</text>
+  <text x="480" y="412" fill="#6e7681" font-size="13" text-anchor="middle">speed from banach plan, which reads 16 MB of headers; it under-promised by 2.5x on the model we measured</text>
+</svg>

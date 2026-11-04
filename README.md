@@ -21,11 +21,42 @@
 <p align="center">
   <a href="brand/video/banach-launch-16x9.mp4"><b>Watch the film</b></a> &nbsp;&middot;&nbsp;
   <a href="#get-started-in-one-line"><b>Get started</b></a> &nbsp;&middot;&nbsp;
-  <a href="#which-model-on-my-machine"><b>Which model on my machine?</b></a> &nbsp;&middot;&nbsp;
+  <a href="#the-giants-on-your-machine"><b>The giants on your machine</b></a> &nbsp;&middot;&nbsp;
   <a href="docs/VALIDATION.md"><b>Every number</b></a>
 </p>
 
 ---
+
+<p align="center">
+  <img src="brand/hero-card.svg" alt="Kimi K2, one trillion parameters, on a desktop with 64 GB of RAM and one RTX 5080: 3.6 tokens per second with lossless expert streaming, per banach plan" width="900">
+</p>
+
+## The giants on your machine
+
+The biggest open models in the world, on machines you can buy at a normal shop. Speeds from
+`banach plan`, which reads only the model headers. It under-promises: on the model we
+measured end to end it said **2.1 tok/s**, and Banach delivered **5.4 tok/s**.
+
+| Model | Parameters | On disk | 16 GB, 4 cores<br><sub>1.3 GB/s disk</sub> | 32 GB desktop<br><sub>DDR5, Gen4 NVMe, no GPU</sub> | 64 GB + RTX 5080<br><sub>2x Gen5 NVMe</sub> |
+|---|---:|---:|---:|---:|---:|
+| **Kimi K2** (UD-Q2_K_XL) | **1 trillion** | 382 GB | 0.2 tok/s | 1.0 tok/s | **3.6 tok/s** |
+| **DeepSeek V4 Flash** (UD-Q4_K_XL) | 284 B | 155 GB | 0.4 tok/s | 2.2 tok/s | **10.0 tok/s** |
+| **Qwen3 235B-A22B** (UD-Q2_K_XL) | 235 B | 89 GB | 0.3 tok/s | 1.7 tok/s | **7.2 tok/s** |
+| **gpt-oss-120b** (F16) | 117 B | 65 GB | 1.0 tok/s | 4.9 tok/s | **24.2 tok/s** |
+| **GLM-4.5-Air** (UD-Q2_K_XL) | 106 B | 47 GB | 0.6 tok/s | 2.8 tok/s | **14.9 tok/s** |
+| **Qwen3.6-35B-A3B** (UD-Q4_K_M) | 35 B | 22 GB | **5.4 tok/s measured** | 8.8 tok/s | **80.6 tok/s** |
+
+Exact weights in every cell, no lossy shortcuts. Ask about your own machine in ten seconds:
+
+```bash
+banach probe && banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf
+```
+
+**Ran one of these?** [Post your numbers](https://github.com/gautam1858/banach/issues/new?title=Benchmark:%20MODEL%20on%20MACHINE)
+with the output of `banach probe` and `banach run`. Measured results replace the planner's
+numbers in this table, with your name on them.
+
+## See it
 
 ```console
 $ pip install banach
@@ -50,7 +81,28 @@ exact-check: PASS byte-identical (64 tokens, logits bit-equal at every step)
   <br><sub>Every coffee goes into test hardware for the trillion-parameter runs. A star helps just as much.</sub>
 </p>
 
-## The numbers
+## How a trillion parameters fit
+
+A Mixture-of-Experts model is huge on disk but small per token: Kimi K2 has a trillion
+parameters and uses about 32 billion of them for each token. The trick is to have the right
+3% in memory at the right moment.
+
+When the file does not fit, plain llama.cpp leaves it to the operating system, which pages
+bytes in 4 KB at a time with no idea which experts come next. Banach knows the model:
+
+<p align="center">
+  <img src="brand/how-it-works.svg" alt="One token through Banach: the router picks 8 of 384 experts; 96% are already in the RAM budget and go straight to compute; the rest are fetched whole from NVMe in parallel; often-used experts are kept and cold ones evicted in the background" width="900">
+</p>
+
+- **Plan first.** `banach plan` reads a few MB of headers and works out the speed, the hot
+  set and the split across GPU, RAM and disk before you download anything.
+- **Stream on purpose.** Whole experts, fetched in parallel the moment the router picks them,
+  inside a RAM budget you choose. Experts earn their place by how often they are used.
+- **Prove it.** Every configuration is checked against stock llama.cpp, token for token and
+  logit for logit, in CI on every commit. Optional faster low-precision experts come with a
+  live fidelity meter, so a shortcut is never silent.
+
+## Proof: a model bigger than RAM, measured end to end
 
 **A 22 GB model on a 16 GB machine.** Qwen3.6-35B-A3B (Q4_K_M) on a 4-core cloud VM with no
 swap and a 1.27 GB/s disk. Cold start, same prompt, same greedy decode.
@@ -72,31 +124,6 @@ only way it runs here. Machine, commit and command for every number:
 
 **No approximations. No re-quantizing. No quality loss.** The exact weights stay on disk.
 Banach just moves them better.
-
-## Which model on my machine?
-
-What `banach plan` says, from headers alone, for the biggest open models on three machines.
-The planner is deliberately conservative: on the 22 GB run above it said **2.1 tok/s**, and
-the measured speed was **5.4 tok/s**.
-
-| Model | Parameters | On disk | 16 GB, 4 cores<br><sub>1.3 GB/s disk</sub> | 32 GB desktop<br><sub>DDR5, Gen4 NVMe, no GPU</sub> | 64 GB + RTX 5080<br><sub>2x Gen5 NVMe</sub> |
-|---|---:|---:|---:|---:|---:|
-| **Kimi K2** (UD-Q2_K_XL) | **1 trillion** | 382 GB | 0.2 tok/s | 1.0 tok/s | **3.6 tok/s** |
-| **DeepSeek V4 Flash** (UD-Q4_K_XL) | 284 B | 155 GB | 0.4 tok/s | 2.2 tok/s | **10.0 tok/s** |
-| **Qwen3 235B-A22B** (UD-Q2_K_XL) | 235 B | 89 GB | 0.3 tok/s | 1.7 tok/s | **7.2 tok/s** |
-| **gpt-oss-120b** (F16) | 117 B | 65 GB | 1.0 tok/s | 4.9 tok/s | **24.2 tok/s** |
-| **GLM-4.5-Air** (UD-Q2_K_XL) | 106 B | 47 GB | 0.6 tok/s | 2.8 tok/s | **14.9 tok/s** |
-| **Qwen3.6-35B-A3B** (UD-Q4_K_M) | 35 B | 22 GB | **5.4 tok/s measured** | 8.8 tok/s | **80.6 tok/s** |
-
-Exact weights in every cell, no lossy shortcuts. Ask about your own machine in ten seconds:
-
-```bash
-banach probe && banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf
-```
-
-**Ran one of these?** [Post your numbers](https://github.com/gautam1858/banach/issues/new?title=Benchmark:%20MODEL%20on%20MACHINE)
-with the output of `banach probe` and `banach run`. Measured results replace the planner's
-numbers in this table, with your name on them.
 
 ## Get started in one line
 
@@ -136,27 +163,6 @@ Apple Silicon. Windows and GPU builds: [from source](#build-from-source).
    ```
 
 4. **Watch it live** at `http://127.0.0.1:8080/banach/status`: engine, fidelity meter, download.
-
-## How a trillion parameters fit
-
-A Mixture-of-Experts model is huge on disk but small per token: Kimi K2 has a trillion
-parameters and uses about 32 billion of them for each token. The trick is to have the right
-3% in memory at the right moment.
-
-When the file does not fit, plain llama.cpp leaves it to the operating system, which pages
-bytes in 4 KB at a time with no idea which experts come next. Banach knows the model:
-
-<p align="center">
-  <img src="brand/how-it-works.svg" alt="One token through Banach: the router picks 8 of 384 experts; 96% are already in the RAM budget and go straight to compute; the rest are fetched whole from NVMe in parallel; often-used experts are kept and cold ones evicted in the background" width="900">
-</p>
-
-- **Plan first.** `banach plan` reads a few MB of headers and works out the speed, the hot
-  set and the split across GPU, RAM and disk before you download anything.
-- **Stream on purpose.** Whole experts, fetched in parallel the moment the router picks them,
-  inside a RAM budget you choose. Experts earn their place by how often they are used.
-- **Prove it.** Every configuration is checked against stock llama.cpp, token for token and
-  logit for logit, in CI on every commit. Optional faster low-precision experts come with a
-  live fidelity meter, so a shortcut is never silent.
 
 ## Runs everywhere
 
