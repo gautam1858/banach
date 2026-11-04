@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="400" viewBox="0 0 960 400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b2e"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#4fb3ff"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/>
+    </marker>
+    <marker id="arrg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arro" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f0883e"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="400" rx="18" fill="url(#bg)"/>
+  <text x="40" y="48" fill="#e6edf3" font-size="22" font-weight="700">One token through Banach</text>
+  <text x="40" y="74" fill="#8b949e" font-size="14">Kimi K2: 1 trillion parameters on disk, about 32 billion used per token</text>
+
+  <!-- token -->
+  <rect x="40" y="150" width="130" height="64" rx="32" fill="#21262d" stroke="#30363d"/>
+  <text x="105" y="188" fill="#e6edf3" font-size="16" font-weight="600" text-anchor="middle">next token</text>
+
+  <!-- router -->
+  <rect x="210" y="140" width="170" height="84" rx="12" fill="#21262d" stroke="#30363d"/>
+  <text x="295" y="176" fill="#e6edf3" font-size="16" font-weight="600" text-anchor="middle">router</text>
+  <text x="295" y="200" fill="#8b949e" font-size="13" text-anchor="middle">picks 8 of 384 experts</text>
+
+  <!-- decision -->
+  <polygon points="500,122 580,182 500,242 420,182" fill="#21262d" stroke="url(#hot)" stroke-width="2"/>
+  <text x="500" y="178" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">in the RAM</text>
+  <text x="500" y="196" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">budget?</text>
+
+  <!-- compute -->
+  <rect x="740" y="140" width="180" height="84" rx="12" fill="url(#hot)"/>
+  <text x="830" y="178" fill="#ffffff" font-size="18" font-weight="700" text-anchor="middle">compute</text>
+  <text x="830" y="201" fill="#eef2ff" font-size="13" text-anchor="middle">exact weights, exact answer</text>
+
+  <!-- fetch -->
+  <rect x="600" y="276" width="220" height="74" rx="12" fill="#21262d" stroke="#f0883e"/>
+  <text x="710" y="306" fill="#e6edf3" font-size="15" font-weight="600" text-anchor="middle">fetch the whole expert</text>
+  <text x="710" y="328" fill="#8b949e" font-size="13" text-anchor="middle">from NVMe, in parallel</text>
+
+  <!-- keep / evict -->
+  <rect x="210" y="276" width="300" height="74" rx="12" fill="#21262d" stroke="#30363d"/>
+  <text x="360" y="306" fill="#e6edf3" font-size="15" font-weight="600" text-anchor="middle">keep the experts used often</text>
+  <text x="360" y="328" fill="#8b949e" font-size="13" text-anchor="middle">evict cold ones in the background</text>
+
+  <!-- edges -->
+  <line x1="170" y1="182" x2="206" y2="182" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="380" y1="182" x2="416" y2="182" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="580" y1="182" x2="736" y2="182" stroke="#3fb950" stroke-width="3" marker-end="url(#arrg)"/>
+  <text x="658" y="170" fill="#3fb950" font-size="14" font-weight="700" text-anchor="middle">yes, 96%</text>
+  <path d="M500,242 L500,313 L596,313" fill="none" stroke="#f0883e" stroke-width="2" marker-end="url(#arro)"/>
+  <text x="514" y="268" fill="#f0883e" font-size="14" font-weight="700">no</text>
+  <path d="M820,313 L860,313 L860,228" fill="none" stroke="#f0883e" stroke-width="2" marker-end="url(#arro)"/>
+  <path d="M210,313 L105,313 L105,218" fill="none" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+  <path d="M900,224 L900,372 L360,372 L360,354" fill="none" stroke="#8b949e" stroke-width="2" marker-end="url(#arr)"/>
+</svg>

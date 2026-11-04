@@ -146,15 +146,9 @@ parameters and uses about 32 billion of them for each token. The trick is to hav
 When the file does not fit, plain llama.cpp leaves it to the operating system, which pages
 bytes in 4 KB at a time with no idea which experts come next. Banach knows the model:
 
-```mermaid
-flowchart LR
-    T([next token]) --> R[router picks 8 of 384 experts]
-    R --> Q{in the RAM budget?}
-    Q -- "yes, 96% of the time" --> C[compute]
-    Q -- no --> F[fetch the whole expert<br>from NVMe, in parallel] --> C
-    C --> A[keep experts that are used often,<br>evict cold ones in the background]
-    A --> T
-```
+<p align="center">
+  <img src="brand/how-it-works.svg" alt="One token through Banach: the router picks 8 of 384 experts; 96% are already in the RAM budget and go straight to compute; the rest are fetched whole from NVMe in parallel; often-used experts are kept and cold ones evicted in the background" width="900">
+</p>
 
 - **Plan first.** `banach plan` reads a few MB of headers and works out the speed, the hot
   set and the split across GPU, RAM and disk before you download anything.
