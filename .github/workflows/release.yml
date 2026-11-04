@@ -1,6 +1,7 @@
 name: release
 
-# Push a tag like v0.1.0 to build binaries for every platform and publish everywhere.
+# Release by pushing a tag like v0.1.0, or from the Actions tab: "release" -> "Run workflow"
+# with a version (the workflow then creates the tag and the GitHub release itself).
 # One-time setup (see RELEASING.md):
 #   PyPI   trusted publisher for this repo and workflow (no secret needed)
 #   npm    repository secret NPM_TOKEN
@@ -10,15 +11,34 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.1.0 (must match Cargo.toml)"
+        required: true
 
 permissions:
   contents: read
 
 env:
   LLAMA_COMMIT: 9309bf1
+  # v0.1.0 from a pushed tag, or "v" + the version typed into "Run workflow"
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the tag matches every package version
+        run: |
+          v="${RELEASE_TAG#v}"
+          grep -q "^version = \"$v\"" Cargo.toml
+          grep -q "^version = \"$v\"" python/pyproject.toml
+          grep -q "\"version\": \"$v\"" npm/banach/package.json
+          echo "releasing $RELEASE_TAG"
+
   build:
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -91,7 +111,7 @@ jobs:
 
   github-release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -101,6 +121,8 @@ jobs:
           path: artifacts
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/*/banach-*.tar.gz
             artifacts/*/banach-*.tar.gz.sha256
@@ -108,7 +130,7 @@ jobs:
 
   pypi:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -124,7 +146,7 @@ jobs:
 
   npm:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -148,7 +170,7 @@ jobs:
 
   crates:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,7 +183,7 @@ jobs:
 
   docker:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -178,5 +200,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}:${{ env.RELEASE_TAG }}
             ghcr.io/${{ github.repository }}:latest

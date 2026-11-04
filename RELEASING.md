@@ -23,11 +23,14 @@ Registries whose secret is missing are skipped, so a release can go out to fewer
 
 1. Bump the version in `Cargo.toml`, `python/pyproject.toml`, `python/src/banach/__init__.py`,
    `npm/banach/package.json` (version and the three `optionalDependencies`).
-2. Commit, then tag and push:
+2. Commit and push, then either push a tag:
 
    ```bash
    git tag v0.1.0 && git push origin v0.1.0
    ```
+
+   or, without git: on GitHub open Actions, pick "release", press "Run workflow" and type
+   the version (for example `0.1.0`). The workflow creates the tag and the release itself.
 
 3. Check the run under Actions. The release page gets the tarballs and checksums that
    `install.sh` downloads.
