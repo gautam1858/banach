@@ -38,6 +38,27 @@ banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode M
   machine the process was killed for running out of memory at 13.9 GB resident. The engine
   now turns repacking off (`--no-repack` in llama.cpp terms).
 
+## banach compare: how far a candidate drifts from a reference
+
+`banach compare REF.gguf CAND.gguf -f TEXT`: both models read the same text, teacher-forced, and
+every position compares the top-1 token and the top-20 distribution (KL, reference to
+candidate). Flip-rate upper bounds come from the same betting confidence sequence as
+`banach certify` (alpha 0.05). The bounds treat tokens as independent; neighbouring tokens are
+correlated, so they are optimistic.
+
+Machine: the 4-thread Xeon VM. Text: the first 6000 bytes of docs/VALIDATION.md (2533 tokens).
+Reference: granite-3.1-1b-a400m-instruct Q8_0.
+
+| Candidate | Top-1 agreement | KL per token | Flip rate, upper 95% | Sure tokens (margin >= 0.1), flip rate |
+|---|---:|---:|---:|---:|
+| the same Q8_0 file (sanity check) | 100.0% | 0.0000 | 0.2% | 0.0% (at most 0.3%) |
+| Q3_K_S | 65.9% | 0.3739 | 36.8% | 31.1% (at most 33.8%) |
+
+A 1B model at 3 bits drifts a lot; the point of the table is that the tool reports it, with the
+sanity row showing it does not invent drift. Strata publishes pack-level numbers of this kind
+(top-1 83.7% for its 2.00 bpw DeepSeek pack, against a Q8 reference); `banach compare` produces
+the same measurement for any pair of GGUFs, including packs and runtime modes other engines ship.
+
 ## Where decode time goes on the 22 GB model (is prefetch worth building?)
 
 Same run as "Bigger than RAM" above: `--mode banach --budget-mb 10000`, 256 tokens, cold start,

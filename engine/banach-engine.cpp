@@ -486,7 +486,7 @@ struct Args {
     std::string model, prompt, prompt_file, heat_in, heat_out, json_out;
     Policy policy = Policy::Admit;
     bool async_evict = true, pageout = false;
-    std::string ladder, eps_file, flips_out;
+    std::string ladder, eps_file, flips_out, compare;
     double tau = INFINITY;
     double min_margin = 0.1;  // confident tokens: exact top-1 beats top-2 by this many nats
     std::vector<double> taus;  // --fidelity sweep
@@ -518,6 +518,8 @@ static void usage() {
         "  --eps FILE / --tau T      per-expert eps table (text: one float per line, layer-major) / threshold\n"
         "  --fidelity T1,T2,...      teacher-forced sweep over tau: top-1 flips and KL against exact\n"
         "  --flips-out PREFIX        with --fidelity: write PREFIX.<tau>.txt: per token, flip and exact margin\n"
+        "  --compare CAND.gguf       score a second model against -m (the reference) on the prompt text:\n"
+        "                            top-1 agreement and KL per token; with --flips-out F writes F.txt\n"
         "  --min-margin M            confident tokens have an exact top-1/top-2 margin >= M nats (default 0.1)\n"
         "  --serve                   persistent worker: line-delimited JSON on stdin/stdout (used by banach serve)\n"
         "  --lazy                    with --serve: the model file is still downloading; ask for missing experts\n"
@@ -542,6 +544,7 @@ static Args parse(int argc, char ** argv) {
         else if (s == "-c") a.ctx = std::stoi(next());
         else if (s == "-ub") a.ubatch = std::stoi(next());
         else if (s == "--budget-mb") a.budget_mb = std::stod(next());
+        else if (s == "--compare") a.compare = next();
         else if (s == "-ngl" || s == "--gpu-layers") a.gpu_layers = std::stoi(next());
         else if (s == "--mode") {
             std::string m = next();
@@ -755,6 +758,52 @@ static double topn_kl(const TopN & r, const TopN & c, size_t t, int n) {
     double kl = 0;
     for (int j = 0; j < n; j++) { double a = rp[j] - rz, b = qp[j] - qz; kl += std::exp(a) * (a - b); }
     return std::min(std::max(kl, 0.0), 10.0);
+}
+
+// Whole-model comparison: the reference (-m) and a candidate (a different quantization, a pruned
+// or re-quantized pack, ...) read the same text; at every position we compare top-1 and the
+// top-n distributions. Teacher-forced, so one wrong token cannot derail the rest.
+static int run_compare(llama_model * ref_model, llama_model * cand_model, const std::vector<llama_token> & toks,
+                       const Args & a) {
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(ref_model));
+    if (llama_vocab_n_tokens(llama_model_get_vocab(cand_model)) != n_vocab)
+        throw std::runtime_error("the two models have different vocabularies; they cannot be compared token for token");
+    const int n = 20;
+    auto score = [&](llama_model * m, const char * what) {
+        llama_context_params cp = llama_context_default_params();
+        cp.n_ctx = (uint32_t) a.ctx; cp.n_batch = (uint32_t) a.ubatch; cp.n_ubatch = (uint32_t) a.ubatch;
+        if (a.threads > 0) { cp.n_threads = a.threads; cp.n_threads_batch = a.threads; }
+        llama_context * ctx = llama_init_from_model(m, cp);
+        if (!ctx) throw std::runtime_error("failed to create context");
+        auto t0 = clk::now();
+        TopN r = forced(ctx, toks, a.ubatch, n_vocab, n);
+        fprintf(stderr, "compare: %s over %zu tokens in %.1f s\n", what, toks.size(), secs(t0, clk::now()));
+        llama_free(ctx);
+        return r;
+    };
+    TopN ref = score(ref_model, "reference");
+    TopN cand = score(cand_model, "candidate");
+    const size_t T = toks.size();
+    size_t flips = 0, confident = 0, confident_flips = 0;
+    double kl_sum = 0;
+    std::vector<int> fl(T);
+    for (size_t t = 0; t < T; t++) {
+        fl[t] = ref.ids[t * n] != cand.ids[t * n];
+        flips += (size_t) fl[t];
+        kl_sum += topn_kl(ref, cand, t, n);
+        if (ref.lp[t * n] - ref.lp[t * n + 1] >= a.min_margin) {
+            confident++;
+            confident_flips += (size_t) fl[t];
+        }
+    }
+    printf("{\"tokens\": %zu, \"flips\": %zu, \"top1_agreement\": %.6f, \"kl_mean\": %.6f, \"min_margin\": %g, "
+           "\"confident_tokens\": %zu, \"confident_flips\": %zu}\n",
+           T, flips, 1.0 - (double) flips / (double) T, kl_sum / (double) T, a.min_margin, confident, confident_flips);
+    if (!a.flips_out.empty()) {
+        std::ofstream f(a.flips_out + ".txt");
+        for (size_t t = 0; t < T; t++) f << fl[t] << " " << (ref.lp[t * n] - ref.lp[t * n + 1]) << "\n";
+    }
+    return 0;
 }
 
 static std::vector<float> read_eps(const std::string & path, size_t n) {
@@ -1306,6 +1355,16 @@ int main(int argc, char ** argv) {
         if (n < 0) throw std::runtime_error("tokenize failed");
         prompt.resize((size_t) n);
         if ((int) prompt.size() + a.n_gen > a.ctx) prompt.resize((size_t) std::max(1, a.ctx - a.n_gen));
+
+        if (!a.compare.empty()) {
+            llama_model * cand = llama_model_load_from_file(a.compare.c_str(), mp);
+            if (!cand) throw std::runtime_error("failed to load " + a.compare);
+            int rc = run_compare(model, cand, prompt, a);
+            llama_model_free(cand);
+            llama_model_free(model);
+            llama_backend_free();
+            return rc;
+        }
 
         llama_model * low = nullptr;
         if (!a.ladder.empty()) {

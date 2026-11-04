@@ -185,6 +185,7 @@ Vulkan builds compiled in CI.
 | Command | What it does |
 |---|---|
 | `banach plan MODEL` | speed and memory split for your machine, from headers |
+| `banach compare REF CAND -f TEXT` | how far a quantization or pruned pack drifts from a reference: top-1 agreement, KL, and a 95% bound on flips |
 | `banach pick` | ranks the big open MoE models by predicted speed on your machine, biggest fast one first |
 | `banach serve MODEL` | local OpenAI and Anthropic server (`--lazy`, `--gpu-layers N`) |
 | `banach run MODEL -p TEXT` | one generation with the planned expert budget |

@@ -30,6 +30,9 @@ usage:
   banach pick [MODEL ...] [--hw FILE] [--ctx N] [--min-tok-s X] [--json]
       rank models by the speed predicted for this machine, biggest model that is fast enough first
       (no MODEL: the built-in list of large open MoE models; only headers are read)
+  banach compare REFERENCE.gguf CANDIDATE.gguf (-f FILE | -p TEXT) [--min-margin M] [--json]
+      how far a candidate model (another quantization, a pruned pack) drifts from the reference on
+      the same text: top-1 agreement, KL, and a 95% upper bound on the flip rate
   banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--gpu-layers N] [--exact-check]
       plan, then decode with banach-engine using the planned RAM budget for routed experts
       (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
@@ -517,6 +520,70 @@ fn cmd_run(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_compare(a: &Args) -> Result<(), String> {
+    let (Some(reference), Some(candidate)) = (a.pos.first(), a.pos.get(1)) else {
+        return Err("compare needs REFERENCE.gguf CANDIDATE.gguf".into());
+    };
+    if a.flags.get("f").is_none() && a.flags.get("p").is_none() {
+        return Err("compare needs the text to score: -f FILE or -p TEXT".into());
+    }
+    let tmp = std::env::temp_dir().join(format!("banach-compare-{}", std::process::id()));
+    let mut cmd = std::process::Command::new(engine_path()?);
+    cmd.arg("-m").arg(reference).arg("--compare").arg(candidate).arg("--flips-out").arg(&tmp);
+    cmd.arg("-c").arg(num::<u64>(a, "ctx", 4096)?.to_string());
+    for k in ["p", "f", "min-margin"] {
+        if let Some(v) = a.flags.get(k) {
+            cmd.arg(if k == "min-margin" { "--min-margin".to_string() } else { format!("-{k}") }).arg(v);
+        }
+    }
+    let out = cmd.stderr(std::process::Stdio::inherit()).output().map_err(|e| format!("starting banach-engine: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("banach-engine exited with {}", out.status));
+    }
+    let stats: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("engine output: {e}"))?;
+    let flips_file = format!("{}.txt", tmp.display());
+    let text = std::fs::read_to_string(&flips_file).map_err(|e| format!("{flips_file}: {e}"))?;
+    let _ = std::fs::remove_file(&flips_file);
+    let rows: Vec<(bool, f64)> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let f = it.next()? == "1";
+            Some((f, it.next().and_then(|m| m.parse().ok()).unwrap_or(f64::INFINITY)))
+        })
+        .collect();
+    let alpha: f64 = num(a, "alpha", 0.05)?;
+    let mm: f64 = num(a, "min-margin", 0.1)?;
+    let all = fidelity::certify(&rows, 0.0, alpha, None);
+    let confident = fidelity::certify(&rows, 0.0, alpha, Some(mm));
+    let agree = stats["top1_agreement"].as_f64().unwrap_or(0.0);
+    let result = serde_json::json!({
+        "reference": reference,
+        "candidate": candidate,
+        "tokens": stats["tokens"],
+        "top1_agreement": agree,
+        "kl_mean": stats["kl_mean"],
+        "flip_rate": all.point(),
+        "flip_rate_upper_95": all.ucb(),
+        "confident_tokens": stats["confident_tokens"],
+        "confident_flip_rate": confident.point(),
+        "confident_flip_rate_upper_95": confident.ucb(),
+        "min_margin": mm,
+        "note": "upper bounds treat tokens as independent; consecutive tokens are correlated, so read them as optimistic",
+    });
+    if a.switches.contains("json") {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    } else {
+        println!(
+            "{} tokens scored\n  top-1 agreement with the reference: {:.1}%  (answers change on {:.1}% of tokens, at most {:.1}% with 95% confidence)\n  KL(reference || candidate): {:.4} per token\n  tokens the reference was sure of (margin >= {} nats): {}, flips {:.1}% (at most {:.1}%)\n  note: bounds treat tokens as independent; consecutive tokens are correlated",
+            stats["tokens"], agree * 100.0, all.point() * 100.0, all.ucb() * 100.0,
+            stats["kl_mean"].as_f64().unwrap_or(0.0), mm, stats["confident_tokens"],
+            confident.point() * 100.0, confident.ucb() * 100.0
+        );
+    }
+    Ok(())
+}
+
 fn cmd_certify(a: &Args) -> Result<(), String> {
     let path = a.pos.first().ok_or("certify needs a FLIPS file")?;
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
@@ -680,6 +747,7 @@ fn main() -> ExitCode {
         "probe" => parse_args(rest, &["disk", "mem-mb"]).and_then(|a| cmd_probe(&a)),
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
+        "compare" => parse_args(rest, &["ctx", "p", "f", "min-margin", "alpha"]).and_then(|a| cmd_compare(&a)),
         "pick" => parse_args(rest, &["ctx", "min-tok-s", "hw"]).and_then(|a| cmd_pick(&a)),
         "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb", "gpu-layers"]).and_then(|a| cmd_run(&a)),
         "pull" => parse_args(rest, &["out", "usage", "workers"]).and_then(|a| cmd_pull(&a)),
