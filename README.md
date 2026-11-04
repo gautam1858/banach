@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/sponsors/gautam1858"><img src="https://img.shields.io/badge/Sponsor-gautam1858-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor gautam1858"></a>
+  <a href="https://github.com/sponsors/gautam1858"><img src="https://img.shields.io/badge/Sponsor-Banach-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor Banach"></a>
 </p>
 
 <p align="center">
@@ -186,9 +186,10 @@ Banach builds on other people's work and says so:
 
 ## Sponsor
 
-If Banach is useful to you, you can support its development through
-[GitHub Sponsors](https://github.com/sponsors/gautam1858). The Sponsor button at the top of
-the repository page lists every way to give.
+Banach is free and open source. If it is useful to you, please
+[sponsor Banach](https://github.com/sponsors/gautam1858): sponsorships fund its development,
+benchmark hardware for the Phase 0 kill checks, and new model support. The Sponsor button at
+the top of this repository page works too.
 
 ## License
 

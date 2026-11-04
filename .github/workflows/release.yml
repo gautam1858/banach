@@ -100,7 +100,8 @@ jobs:
           mkdir -p dist stage
           cp target/release/banach build-engine/banach-engine stage/
           tar -czf dist/banach-${{ matrix.target }}.tar.gz -C stage banach banach-engine
-          (cd dist && shasum -a 256 banach-${{ matrix.target }}.tar.gz > banach-${{ matrix.target }}.tar.gz.sha256)
+          if command -v sha256sum >/dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
+          (cd dist && $sum banach-${{ matrix.target }}.tar.gz > banach-${{ matrix.target }}.tar.gz.sha256)
           python3 -m pip wheel --help >/dev/null
           python/build_wheel.sh stage/banach stage/banach-engine ${{ matrix.wheel }} dist/wheels
           npm/build_platform.sh ${{ matrix.npm }} stage/banach stage/banach-engine dist/npm
