@@ -168,8 +168,8 @@ Apple Silicon. Windows and GPU builds: [from source](#build-from-source).
 | macOS, Apple Silicon | CPU, Metal | prefetch, soft budget |
 | Any GPU | `--gpu-layers N` | dense layers on the GPU, experts streamed from RAM |
 
-Byte-exact against stock llama.cpp in CI on Linux x64, Linux arm64 and Windows; CUDA and
-Vulkan builds compiled in CI.
+Byte-exact against stock llama.cpp in CI on Linux x64, Linux arm64, macOS and Windows;
+CUDA and Vulkan builds compiled in CI.
 
 ## Everything in the box
 
