@@ -76,11 +76,6 @@ $ banach-engine -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -f story.txt -n 64 --budget-mb
 exact-check: PASS byte-identical (64 tokens, logits bit-equal at every step)
 ```
 
-<p align="center">
-  <a href="https://buymeacoffee.com/gautam1858"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="44"></a>
-  <br><sub>Every coffee goes into test hardware for the trillion-parameter runs. A star helps just as much.</sub>
-</p>
-
 ## How a trillion parameters fit
 
 A Mixture-of-Experts model is huge on disk but small per token: Kimi K2 has a trillion
