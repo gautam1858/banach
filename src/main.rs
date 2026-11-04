@@ -26,13 +26,13 @@ usage:
       (--ctx is the context length decode runs at; attention cost grows with it)
       preflight card: predicted speed and fidelity per plan, before downloading weights
       (--hw plans for another machine from its saved hardware.json)
-  banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--exact-check]
+  banach run MODEL (-p TEXT | -f FILE) [-n N] [--ctx N] [--budget-mb N] [--gpu-layers N] [--exact-check]
       plan, then decode with banach-engine using the planned RAM budget for routed experts
       (engine binary: $BANACH_ENGINE, next to this binary, or on PATH)
   banach pull hf:OWNER/REPO/FILE.gguf [--out DIR] [--usage FILE] [--workers N]
       resumable download: header and dense tensors first, hot experts next (with --usage),
       SHA-256 checked against the Hugging Face LFS object id
-  banach serve MODEL [--host H] [--port P] [--ctx N] [--budget-mb N] [--lazy]
+  banach serve MODEL [--host H] [--port P] [--ctx N] [--budget-mb N] [--gpu-layers N] [--lazy]
                [--ladder LOW.gguf --eps FILE --tau T --target P --min-margin M --period N]
       OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) compatible server on
       127.0.0.1:8080; MODEL may be hf:... (downloaded first, or served while downloading
@@ -330,16 +330,19 @@ fn engine_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("BANACH_ENGINE") {
         return Ok(PathBuf::from(p));
     }
+    let name = format!("banach-engine{}", std::env::consts::EXE_SUFFIX);
     if let Ok(me) = std::env::current_exe() {
-        let side = me.with_file_name("banach-engine");
+        let side = me.with_file_name(&name);
         if side.exists() {
             return Ok(side);
         }
     }
-    for dir in std::env::var("PATH").unwrap_or_default().split(':') {
-        let c = Path::new(dir).join("banach-engine");
-        if c.exists() {
-            return Ok(c);
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let c = dir.join(&name);
+            if c.exists() {
+                return Ok(c);
+            }
         }
     }
     Err("banach-engine not found: build engine/ and set BANACH_ENGINE or put it next to banach".into())
@@ -383,6 +386,9 @@ fn cmd_run(a: &Args) -> Result<(), String> {
     }
     if budget_mb > 0.0 {
         cmd.arg("--budget-mb").arg(format!("{budget_mb:.0}"));
+    }
+    if let Some(g) = a.flags.get("gpu-layers") {
+        cmd.arg("--gpu-layers").arg(g);
     }
     if a.switches.contains("exact-check") {
         cmd.arg("--exact-check");
@@ -537,6 +543,7 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
         port: num(a, "port", 8080)?,
         ctx: num(a, "ctx", 8192)?,
         threads: a.flags.get("threads").and_then(|t| t.parse().ok()),
+        gpu_layers: a.flags.get("gpu-layers").and_then(|g| g.parse().ok()),
         budget_mb: a.flags.get("budget-mb").and_then(|b| b.parse().ok()),
         ladder: a.flags.get("ladder").map(PathBuf::from),
         eps: a.flags.get("eps").map(PathBuf::from),
@@ -561,9 +568,9 @@ fn main() -> ExitCode {
         "probe" => parse_args(rest, &["disk", "mem-mb"]).and_then(|a| cmd_probe(&a)),
         "inspect" => parse_args(rest, &[]).and_then(|a| cmd_inspect(&a)),
         "plan" => parse_args(rest, &["ctx", "min-tok-s", "usage", "hw"]).and_then(|a| cmd_plan(&a)),
-        "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb"]).and_then(|a| cmd_run(&a)),
+        "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb", "gpu-layers"]).and_then(|a| cmd_run(&a)),
         "pull" => parse_args(rest, &["out", "usage", "workers"]).and_then(|a| cmd_pull(&a)),
-        "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "budget-mb", "ladder", "eps", "tau", "target",
+        "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "gpu-layers", "budget-mb", "ladder", "eps", "tau", "target",
                                       "min-margin", "period", "shadow-every", "out", "usage", "workers"])
             .and_then(|a| cmd_serve(&a)),
         "certify" => parse_args(rest, &["target", "alpha", "min-margin"]).and_then(|a| cmd_certify(&a)),

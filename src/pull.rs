@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -317,7 +316,7 @@ impl Puller {
         for attempt in 0..4 {
             match src.read_at(s, (e - s) as usize) {
                 Ok(buf) if buf.len() as u64 == e - s => {
-                    file.write_all_at(&buf, s).map_err(|er| er.to_string())?;
+                    write_all_at(&file, &buf, s).map_err(|er| er.to_string())?;
                     let mut sc = self.sidecars[si].lock().unwrap();
                     writeln!(sc, "{s} {e}").map_err(|er| er.to_string())?;
                     let mut st = self.state.lock().unwrap();
@@ -471,4 +470,25 @@ mod tests {
         assert_eq!(sha256_file(&p).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+}
+
+/// Positional write that leaves the file cursor alone, so worker threads can share one handle.
+#[cfg(unix)]
+fn write_all_at(f: &File, buf: &[u8], off: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    f.write_all_at(buf, off)
+}
+
+#[cfg(windows)]
+fn write_all_at(f: &File, mut buf: &[u8], mut off: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = f.seek_write(buf, off)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "short write"));
+        }
+        buf = &buf[n..];
+        off += n as u64;
+    }
+    Ok(())
 }

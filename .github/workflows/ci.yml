@@ -10,15 +10,22 @@ permissions:
 
 env:
   LLAMA_COMMIT: 9309bf1
+  STORIES_URL: https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/stories15M_MOE-Q8_0.gguf
+  STORIES_SHA: c7aa6863f9a4b3cdf19716e2c95622dcbd3bd06989324bf1ac8e60486ef8e881
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --release
-      - run: cargo package --no-verify
+      - if: runner.os == 'Linux'
+        run: cargo package --no-verify
 
   python:
     runs-on: ubuntu-latest
@@ -32,25 +39,81 @@ jobs:
 
   engine:
     # build against the pinned llama.cpp with the ladder patch, then prove streaming is
-    # byte-identical to stock llama.cpp on a small MoE
-    runs-on: ubuntu-latest
+    # byte-identical to stock llama.cpp on a small MoE, on every desktop OS
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+          - os: macos-14
+            name: macos-arm64-metal
+          - os: windows-latest
+            name: windows-x64
+    name: engine (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - if: runner.os == 'macOS'
+        run: brew install ninja
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: llama.cpp with the ladder patch
         run: |
           git clone https://github.com/ggml-org/llama.cpp ../llama.cpp
           cd ../llama.cpp && git checkout $LLAMA_COMMIT
-          git apply ../banach/engine/patches/0001-banach-precision-ladder.patch
+          git apply --ignore-whitespace ../banach/engine/patches/0001-banach-precision-ladder.patch
       - name: build engine and tracer
         run: |
-          cmake -S engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/../llama.cpp -DBANACH_PORTABLE=ON
-          ninja -C build-engine banach-engine
-          cmake -S tracer -B build-trace -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=$PWD/../llama.cpp
-          ninja -C build-trace banach-trace
+          cmake -S engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/../llama.cpp" -DBANACH_PORTABLE=ON
+          cmake --build build-engine --target banach-engine
+          cmake -S tracer -B build-trace -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/../llama.cpp"
+          cmake --build build-trace --target banach-trace
       - name: byte-exact streaming oracle
         run: |
-          curl -fsSL -o stories.gguf https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/stories15M_MOE-Q8_0.gguf
-          echo "c7aa6863f9a4b3cdf19716e2c95622dcbd3bd06989324bf1ac8e60486ef8e881  stories.gguf" | sha256sum -c
+          curl -fsSL -o stories.gguf "$STORIES_URL"
+          python3 -c "import hashlib,sys; h=hashlib.sha256(open('stories.gguf','rb').read()).hexdigest(); sys.exit(h!='$STORIES_SHA')"
           echo "Once upon a time there was a robot who" > prompt.txt
-          engine/exact_check.sh build-engine/banach-engine stories.gguf prompt.txt 16
+          exe=build-engine/banach-engine; [ -f "$exe.exe" ] && exe="$exe.exe"
+          engine/exact_check.sh "$exe" stories.gguf prompt.txt 16
+
+  engine-gpu:
+    # GPU backends: compile the engine with CUDA and with Vulkan (no GPU on the runners, so
+    # these prove the build; the byte-exact runs above cover the streaming logic)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cuda
+            container: nvidia/cuda:12.6.3-devel-ubuntu24.04
+            deps: cmake ninja-build git
+            flags: -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86
+          - name: vulkan
+            container: ubuntu:24.04
+            deps: cmake ninja-build git g++ libvulkan-dev glslc
+            flags: -DGGML_VULKAN=ON
+    name: engine (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    steps:
+      - run: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ${{ matrix.deps }}
+      - uses: actions/checkout@v4
+        with:
+          path: banach
+      - name: llama.cpp with the ladder patch
+        run: |
+          git clone https://github.com/ggml-org/llama.cpp llama.cpp
+          cd llama.cpp && git checkout $LLAMA_COMMIT
+          git apply ../banach/engine/patches/0001-banach-precision-ladder.patch
+      - name: build engine
+        run: |
+          cmake -S banach/engine -B build-engine -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$PWD/llama.cpp" -DBANACH_PORTABLE=ON ${{ matrix.flags }}
+          cmake --build build-engine --target banach-engine
+          test -x build-engine/banach-engine

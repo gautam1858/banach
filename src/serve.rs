@@ -31,6 +31,7 @@ pub struct ServeOptions {
     pub port: u16,
     pub ctx: u64,
     pub threads: Option<u32>,
+    pub gpu_layers: Option<i32>,
     pub budget_mb: Option<f64>,
     pub ladder: Option<PathBuf>,
     pub eps: Option<PathBuf>,
@@ -58,6 +59,9 @@ impl EngineProc {
         cmd.arg("--serve").arg("-m").arg(&o.model).arg("-c").arg(o.ctx.to_string());
         if let Some(t) = o.threads {
             cmd.arg("-t").arg(t.to_string());
+        }
+        if let Some(g) = o.gpu_layers {
+            cmd.arg("--gpu-layers").arg(g.to_string());
         }
         if let Some(b) = o.budget_mb {
             cmd.arg("--budget-mb").arg(format!("{b:.0}"));

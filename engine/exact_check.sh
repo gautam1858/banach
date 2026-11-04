@@ -13,7 +13,7 @@ fi
 engine=$1; model=$2; prompt=$3; n=${4:-24}
 
 # model size in MB, to pick budgets of roughly 20%, 50% and 100% of the routed pool
-size_mb=$(( $(stat -c %s "$model") / 1000000 ))
+size_mb=$(( $(wc -c < "$model") / 1000000 ))
 fail=0
 for budget in $((size_mb / 5)) $((size_mb / 2)) 0; do
   for policy in lru admit; do

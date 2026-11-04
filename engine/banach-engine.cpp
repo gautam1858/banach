@@ -23,10 +23,7 @@
 #include "sampling.h"
 #include "json.h"
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <unistd.h>
+#include "platform.h"
 
 #include <algorithm>
 #include <atomic>
@@ -51,20 +48,12 @@
 #include <unordered_map>
 #include <vector>
 
-// Linux has the fast paths (readahead, MADV_POPULATE_READ, MADV_PAGEOUT, fadvise). Other
-// POSIX systems (macOS) fall back to MADV_WILLNEED plus touching one byte per page, and to
-// MADV_DONTNEED for eviction, which makes the budget a soft one there.
-#ifndef MADV_PAGEOUT
-#define MADV_PAGEOUT 21
-#endif
-#ifndef MADV_POPULATE_READ
-#define MADV_POPULATE_READ 22
-#endif
+// OS-specific prefetch, eviction and residency calls live in platform.h.
 
 using clk = std::chrono::steady_clock;
 static double secs(clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); }
 
-static const size_t PAGE = (size_t) sysconf(_SC_PAGESIZE);
+static const size_t PAGE = plat::page_size();
 
 // ---------------------------------------------------------------- worker pool
 
@@ -235,32 +224,22 @@ struct Engine {
 
     // Fraction of the expert's pages present in the page cache and mapped.
     double residency(const Expert & x) {
-        size_t present = 0, total = 0;
-        std::vector<unsigned char> vec;
+        double present = 0, total = 0;
         for (const Slice & s : x.slices) {
             uint8_t * a; size_t len;
             aligned_outer(s.ptr, s.bytes, a, len);
-            vec.resize(len / PAGE);
-#if defined(__linux__)
-            if (mincore(a, len, vec.data()) != 0) return -1;
-#else
-            if (mincore(a, len, (char *) vec.data()) != 0) return -1;
-#endif
-            for (unsigned char c : vec) present += c & 1;
-            total += vec.size();
+            const double r = plat::residency(a, len, PAGE);
+            if (r < 0) return -1;
+            present += r * (double) len;
+            total += (double) len;
         }
-        return total ? (double) present / (double) total : 1.0;
+        return total > 0 ? present / total : 1.0;
     }
 
     static void drop(const Slice & s, bool pageout) {
-        uint8_t * a; size_t len;
-#if defined(__linux__)
-        if (aligned_inner(s.ptr, s.bytes, a, len)) madvise(a, len, pageout ? MADV_PAGEOUT : MADV_DONTNEED);
-        posix_fadvise(s.fd, (off_t) s.file_off, (off_t) s.bytes, POSIX_FADV_DONTNEED);
-#else
-        (void) pageout;
-        if (aligned_inner(s.ptr, s.bytes, a, len)) madvise(a, len, MADV_DONTNEED);
-#endif
+        uint8_t * a = nullptr; size_t len = 0;
+        if (!aligned_inner(s.ptr, s.bytes, a, len)) len = 0;
+        plat::drop(s.fd, s.file_off, s.bytes, a, len, pageout);
     }
 
     void evict(const Expert & x) {
@@ -275,20 +254,10 @@ struct Engine {
     }
 
     static void fetch_one(const Slice & s) {
-        // Whole-slice read into the page cache (no copy), then map it in one call.
+        // whole-slice read into memory, then mapped in one go (platform.h)
         uint8_t * a; size_t len;
         aligned_outer(s.ptr, s.bytes, a, len);
-#if defined(__linux__)
-        if (readahead(s.fd, (off64_t) s.file_off, s.bytes) != 0) {
-            posix_fadvise(s.fd, (off_t) s.file_off, (off_t) s.bytes, POSIX_FADV_WILLNEED);
-        }
-        madvise(a, len, MADV_POPULATE_READ);
-#else
-        madvise(a, len, MADV_WILLNEED);
-        volatile uint8_t sink = 0;
-        for (size_t o = 0; o < len; o += PAGE) sink ^= a[o];  // fault the pages in
-        (void) sink;
-#endif
+        plat::fetch(s.fd, s.file_off, s.bytes, a, len, PAGE);
     }
 
     void touch(int64_t key) {
@@ -378,8 +347,11 @@ struct Engine {
             st.accesses++;
             heat[key] += (double) occ[key] / (double) std::max<int64_t>(1, n_tokens);
             if (check_residency) {
-                st.resident_checked++;
-                if (residency(*x) >= 0.99) st.resident_true++;
+                const double r = residency(*x);
+                if (r >= 0) {
+                    st.resident_checked++;
+                    if (r >= 0.99) st.resident_true++;
+                }
             }
             if (where.count(key)) {
                 st.hits++;
@@ -522,6 +494,7 @@ struct Args {
     bool serve = false, lazy = false;
     double half_life = 256;
     int n_gen = 64, threads = 0, io_threads = 8, ctx = 4096, ubatch = 512;
+    int gpu_layers = 0;  // dense layers to offload; routed experts always stay in host memory
     double budget_mb = 0;
     Mode mode = Mode::Banach;
     bool cold = true, exact_check = false, residency = true;
@@ -536,6 +509,8 @@ static void usage() {
         "  -n N                      tokens to generate greedily (default 64)\n"
         "  -t N / --io-threads N     compute threads / fetch threads (default all / 8)\n"
         "  -c N / -ub N              context / ubatch (default 4096 / 512)\n"
+        "  -ngl N / --gpu-layers N   offload N layers to the GPU (CUDA, Metal, Vulkan builds); routed\n"
+        "                            experts stay in host memory and are streamed (default 0)\n"
         "  --policy lru|admit        eviction LRU; admit adds frequency-gated admission (default admit)\n"
         "  --half-life N             decay of usage frequency in decode steps (default 256)\n"
         "  --sync-evict / --pageout  evict on the critical path / with MADV_PAGEOUT (for comparison)\n"
@@ -567,6 +542,7 @@ static Args parse(int argc, char ** argv) {
         else if (s == "-c") a.ctx = std::stoi(next());
         else if (s == "-ub") a.ubatch = std::stoi(next());
         else if (s == "--budget-mb") a.budget_mb = std::stod(next());
+        else if (s == "-ngl" || s == "--gpu-layers") a.gpu_layers = std::stoi(next());
         else if (s == "--mode") {
             std::string m = next();
             if (m == "off") a.mode = Mode::Off;
@@ -630,15 +606,11 @@ static std::vector<std::string> split_paths(const std::string & first) {
 
 struct ProcIo { uint64_t read_bytes = 0; long majflt = 0, minflt = 0; };
 static ProcIo proc_io() {
+    const plat::IoCounters c = plat::io_counters();
     ProcIo p;
-    std::ifstream f("/proc/self/io");
-    std::string k;
-    uint64_t v;
-    while (f >> k >> v) if (k == "read_bytes:") p.read_bytes = v;
-    rusage ru{};
-    getrusage(RUSAGE_SELF, &ru);
-    p.majflt = ru.ru_majflt;
-    p.minflt = ru.ru_minflt;
+    p.read_bytes = c.read_bytes;
+    p.majflt = c.major_faults;
+    p.minflt = c.minor_faults;
     return p;
 }
 
@@ -861,7 +833,7 @@ static size_t setup_engine(Engine & E, llama_model * model, const Args & a, cons
     // file locations of every tensor, for whole-slice reads with our own descriptors
     auto paths = split_paths(a.model);
     for (size_t si = 0; si < paths.size(); si++) {
-        int fd = open(paths[si].c_str(), O_RDONLY | O_NOFOLLOW);
+        int fd = plat::open_ro(paths[si]);
         if (fd < 0) throw std::runtime_error("cannot open " + paths[si]);
         E.fds.push_back(fd);
         gguf_init_params gp{true, nullptr};
@@ -1300,6 +1272,15 @@ int main(int argc, char ** argv) {
         llama_backend_init();
         llama_model_params mp = llama_model_default_params();
         mp.load_mode = LLAMA_LOAD_MODE_MMAP;
+        // dense weights and KV go to the GPU when asked; routed experts are pinned to host
+        // memory, where the streamer manages them (the same split as llama.cpp's -ot exps=CPU)
+        mp.n_gpu_layers = a.gpu_layers;
+        static llama_model_tensor_buft_override host_experts[2] = {};
+        if (a.gpu_layers != 0) {
+            host_experts[0] = {"ffn_(up|down|gate|gate_up)_exps", ggml_backend_cpu_buffer_type()};
+            host_experts[1] = {nullptr, nullptr};
+            mp.tensor_buft_overrides = host_experts;
+        }
         llama_model * model = llama_model_load_from_file(a.model.c_str(), mp);
         if (!model) throw std::runtime_error("failed to load " + a.model);
         if (a.serve) {
@@ -1424,7 +1405,7 @@ int main(int argc, char ** argv) {
                 std::ofstream f(a.heat_out);
                 for (auto & kv : E.heat) f << kv.first << " " << kv.second << "\n";
             }
-            for (int fd : E.fds) close(fd);
+            for (int fd : E.fds) plat::close_fd(fd);
         }
         json += "\"generated\": " + std::to_string(ref.tokens.size()) + "}";
         if (!a.json_out.empty()) std::ofstream(a.json_out) << json << "\n";
