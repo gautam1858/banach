@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "banach"
-version = "0.1.2"
+version = "0.1.3"
 description = "Run very large Mixture-of-Experts models on ordinary machines, with an honest plan and a measured fidelity contract"
 readme = "README.md"
 license = { text = "Apache-2.0" }
