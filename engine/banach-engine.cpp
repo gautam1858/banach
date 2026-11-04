@@ -1272,6 +1272,10 @@ int main(int argc, char ** argv) {
         llama_backend_init();
         llama_model_params mp = llama_model_default_params();
         mp.load_mode = LLAMA_LOAD_MODE_MMAP;
+        // no CPU weight repacking: repacked tensors are copied out of the mapping into
+        // anonymous memory, which cannot be streamed and does not fit when the model is
+        // larger than RAM (same as llama.cpp --no-repack; applies to every --mode)
+        mp.use_extra_bufts = false;
         // dense weights and KV go to the GPU when asked; routed experts are pinned to host
         // memory, where the streamer manages them (the same split as llama.cpp's -ot exps=CPU)
         mp.n_gpu_layers = a.gpu_layers;
