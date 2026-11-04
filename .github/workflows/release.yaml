@@ -4,9 +4,6 @@ name: release
 # with a version (the workflow then creates the tag and the GitHub release itself).
 # One-time setup (see RELEASING.md):
 #   PyPI   trusted publisher for this repo and workflow (no secret needed)
-#   npm    repository secret NPM_TOKEN
-#   crates repository secret CARGO_REGISTRY_TOKEN
-#   GHCR   nothing (uses GITHUB_TOKEN)
 on:
   push:
     tags: ["v*"]
@@ -63,6 +60,9 @@ jobs:
             ggml: ""
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
+    # macOS runners are sometimes unavailable; the Linux wheels still ship without them
+    continue-on-error: ${{ matrix.runner == 'macos-14' }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: tools
@@ -112,7 +112,7 @@ jobs:
 
   github-release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() && needs.build.result != 'failure' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -133,7 +133,7 @@ jobs:
 
   pypi:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() && needs.build.result != 'failure' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -144,68 +144,7 @@ jobs:
           path: artifacts
           # only the build outputs (the Docker job also leaves a build record artifact)
           pattern: build-*
-      - run: mkdir -p wheels && cp artifacts/*/wheels/*.whl wheels/
+      - run: mkdir -p wheels && cp artifacts/*/wheels/*.whl wheels/ && ls -l wheels/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheels/
-
-  npm:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          # only the build outputs (the Docker job also leaves a build record artifact)
-          pattern: build-*
-      - name: platform packages, then the launcher
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "NPM_TOKEN is not set; skipping npm"; exit 0; fi
-          for d in artifacts/*/npm/banach-*; do (cd "$d" && npm publish --provenance --access public); done
-          cp README.md npm/banach/README.md
-          cd npm/banach && npm publish --provenance --access public
-
-  crates:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then echo "CARGO_REGISTRY_TOKEN is not set; skipping crates.io"; exit 0; fi
-          cargo publish
-
-  docker:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ env.RELEASE_TAG }}
-            ghcr.io/${{ github.repository }}:latest

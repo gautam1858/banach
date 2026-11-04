@@ -1,6 +1,6 @@
 {
   "name": "banach",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Run very large Mixture-of-Experts models on ordinary machines, with an honest plan and a measured fidelity contract",
   "license": "Apache-2.0",
   "homepage": "https://github.com/gautam1858/banach",
@@ -11,8 +11,8 @@
   "files": ["bin/banach.js", "README.md"],
   "engines": { "node": ">=16" },
   "optionalDependencies": {
-    "banach-linux-x64": "0.1.1",
-    "banach-linux-arm64": "0.1.1",
-    "banach-darwin-arm64": "0.1.1"
+    "banach-linux-x64": "0.1.2",
+    "banach-linux-arm64": "0.1.2",
+    "banach-darwin-arm64": "0.1.2"
   }
 }
