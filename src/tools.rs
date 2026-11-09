@@ -122,7 +122,10 @@ pub fn openai_tool_choice(v: &Value, tools: &mut Vec<Value>) -> Option<String> {
 }
 
 /// Anthropic messages request -> (OpenAI-format messages, tools, tool_choice).
-pub fn anthropic_request(body: &Value) -> Result<(Vec<Value>, Vec<Value>, Option<String>), String> {
+/// Messages, tools and tool_choice of an Anthropic request, in OpenAI form.
+pub type NormalisedRequest = (Vec<Value>, Vec<Value>, Option<String>);
+
+pub fn anthropic_request(body: &Value) -> Result<NormalisedRequest, String> {
     let mut msgs = vec![];
     match &body["system"] {
         Value::Null => {}

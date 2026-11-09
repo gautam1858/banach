@@ -8,7 +8,9 @@ banach=$1; engine=$2; tag=$3; out=$4
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cp -r "$here/." "$work/"
-cp "$here/../README.md" "$work/README.md"
+# PyPI renders the README away from the repository: relative images and links become absolute
+python3 "$here/../scripts/pypi_readme.py" "$here/../README.md" > "$work/README.md"
+cp "$here/../LICENSE" "$here/../THIRD_PARTY_NOTICES.md" "$work/"
 mkdir -p "$work/src/banach/bin"
 install -m 755 "$banach" "$work/src/banach/bin/banach"
 install -m 755 "$engine" "$work/src/banach/bin/banach-engine"

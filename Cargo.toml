@@ -1,10 +1,10 @@
 [package]
 name = "banach"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "Apache-2.0"
 description = "Run very large MoE models on ordinary machines, with an honest plan and a measured fidelity contract"
-rust-version = "1.75"
+rust-version = "1.89"
 authors = ["Gautam"]
 repository = "https://github.com/gautam1858/banach"
 homepage = "https://github.com/gautam1858/banach"

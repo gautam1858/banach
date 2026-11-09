@@ -78,11 +78,15 @@ pub struct Constraints {
     pub usage: Option<Vec<Vec<f64>>>,
     /// Assumed disk bandwidth when the probe did not measure one.
     pub default_disk_bw: f64,
+    /// Model a GPU tier for routed experts (a VRAM expert cache). `banach-engine` does not have
+    /// one: with `--gpu-layers` the dense layers and KV cache go to the GPU while routed experts
+    /// stay in host memory. Off by default, so plans describe what the engine does today.
+    pub vram_experts: bool,
 }
 
 impl Default for Constraints {
     fn default() -> Self {
-        Self { ctx: 8192, min_tok_s: 5.0, reserve_bytes: 2 * GIB, usage: None, default_disk_bw: 5.5 * GB }
+        Self { ctx: 8192, min_tok_s: 5.0, reserve_bytes: 2 * GIB, usage: None, default_disk_bw: 5.5 * GB, vram_experts: false }
     }
 }
 
@@ -153,6 +157,11 @@ pub fn hit_from_usage(usage: &[Vec<f64>], expert_bytes: &[u64], capacity_bytes: 
     (1.0 - s.cost / total, kept)
 }
 
+/// Smallest share of a model's experts held in memory in any run the planner was compared with
+/// (Granite 3.1 1B-A400M at a 300 MB budget, docs/VALIDATION.md). Below it the hit-rate curve is
+/// extrapolated, not measured.
+const VALIDATED_MIN_EXPERT_FRACTION: f64 = 0.23;
+
 struct Tiers {
     vram: u64,
     vram_bw: Option<f64>,
@@ -185,7 +194,7 @@ struct Placement {
 }
 
 /// Dense path and KV first (fastest tier that fits), then experts fill what is left.
-fn place(m: &ModelProfile, t: &Tiers, kv: u64, expert_bytes: u64) -> Placement {
+fn place(m: &ModelProfile, t: &Tiers, kv: u64, expert_bytes: u64, vram_experts: bool) -> Placement {
     let must = m.dense_read_bytes + m.embedding_bytes + kv;
     let (dense_vram, dense_ram) = if t.vram_bw.is_some() && must <= t.vram { (must, 0) } else { (0, must) };
     let feasible = dense_ram <= t.ram;
@@ -193,7 +202,7 @@ fn place(m: &ModelProfile, t: &Tiers, kv: u64, expert_bytes: u64) -> Placement {
     let ram_left = t.ram.saturating_sub(dense_ram);
     let n_total = m.n_experts * m.n_moe_layers;
     let per = expert_bytes.max(1);
-    let hot_vram = if t.vram_bw.is_some() { (vram_left / per).min(n_total) } else { 0 };
+    let hot_vram = if t.vram_bw.is_some() && vram_experts { (vram_left / per).min(n_total) } else { 0 };
     let hot_ram = (ram_left / per).min(n_total - hot_vram);
     Placement { dense_vram, dense_ram, hot_vram, hot_ram, feasible }
 }
@@ -239,7 +248,7 @@ fn plan_for(name: &str, m: &ModelProfile, hw: &Hardware, c: &Constraints, cal: &
     let t = tiers(hw, c, cal);
     let kv = m.kv_bytes_per_token * c.ctx;
     let expert_bytes = (m.expert_bytes as f64 * expert_scale) as u64;
-    let p = place(m, &t, kv, expert_bytes);
+    let p = place(m, &t, kv, expert_bytes, c.vram_experts);
     if !p.feasible {
         return None;
     }
@@ -268,6 +277,16 @@ fn plan_for(name: &str, m: &ModelProfile, hw: &Hardware, c: &Constraints, cal: &
     }
     if c.usage.is_none() && hot < n_total {
         notes.push("hit rate from the generic curve; pass --usage from a routing trace for a tighter range".into());
+    }
+    if frac < VALIDATED_MIN_EXPERT_FRACTION {
+        notes.push(format!(
+            "only {:.0}% of the experts fit in memory; the planner was checked against measurements down to {:.0}%, so this estimate is not validated",
+            frac * 100.0,
+            VALIDATED_MIN_EXPERT_FRACTION * 100.0
+        ));
+    }
+    if c.vram_experts {
+        notes.push("assumes a VRAM expert cache, which banach-engine does not have yet: a projection".into());
     }
     if cal.calibrated_on.is_none() {
         notes.push("uncalibrated; `banach calibrate` with one measured run tightens this".into());
@@ -483,6 +502,33 @@ mod tests {
                 last = p.tok_s.mid;
             }
         }
+    }
+
+    #[test]
+    fn gpu_plan_keeps_experts_on_the_host_unless_asked() {
+        use crate::probe::Gpu;
+        let mut hw = box32();
+        hw.gpus = vec![Gpu { name: "test".into(), vram_bytes: 16 * GIB, bandwidth: Some(900e9) }];
+        let today = plan(&v4_like(), &hw, &Constraints::default(), &Calibration::default());
+        let projected = plan(&v4_like(), &hw, &Constraints { vram_experts: true, ..Default::default() }, &Calibration::default());
+        let (t, p) = (&today.plans[0], &projected.plans[0]);
+        // today: only dense layers and KV can sit in VRAM; no expert is placed there
+        assert!(t.bytes_vram <= v4_like().dense_read_bytes + v4_like().embedding_bytes + v4_like().kv_bytes_per_token * 8192);
+        assert!(p.bytes_vram > t.bytes_vram);
+        assert!(p.tok_s.mid > t.tok_s.mid, "{} vs {}", p.tok_s.mid, t.tok_s.mid);
+        assert!(p.notes.iter().any(|n| n.contains("projection")));
+        assert!(!t.notes.iter().any(|n| n.contains("projection")));
+    }
+
+    #[test]
+    fn warns_when_few_experts_fit() {
+        // v4_like on 32 GB holds a small share of its experts
+        let r = plan(&v4_like(), &box32(), &Constraints::default(), &Calibration::default());
+        assert!(r.plans[0].notes.iter().any(|n| n.contains("not validated")), "{:?}", r.plans[0].notes);
+        let mut big = box32();
+        big.ram_available = 300 * GIB;
+        let r = plan(&v4_like(), &big, &Constraints::default(), &Calibration::default());
+        assert!(!r.plans[0].notes.iter().any(|n| n.contains("not validated")));
     }
 
     #[test]

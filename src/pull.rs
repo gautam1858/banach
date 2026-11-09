@@ -117,6 +117,23 @@ pub fn is_complete(path: &Path) -> bool {
     path.exists() && !sidecar(path).exists()
 }
 
+/// Owner and repo names are single plain path segments.
+fn valid_name(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A file path inside a repo, or a revision such as `refs/pr/1`: `/`-separated segments, none
+/// empty, `.` or `..`, and no characters that could leave the download directory.
+fn valid_subpath(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'=' | b'~' | b'@' | b' '))
+        })
+}
+
 fn hf_parts(spec: &str) -> Result<Vec<(String, String, String, String)>, String> {
     // -> (owner, repo, rev, file path in repo) per split part
     let mut out = vec![];
@@ -129,10 +146,10 @@ fn hf_parts(spec: &str) -> Result<Vec<(String, String, String, String)>, String>
         let mut it = path.splitn(3, '/');
         let (o, r, f) = (it.next(), it.next(), it.next());
         match (o, r, f) {
-            (Some(o), Some(r), Some(f)) if !o.is_empty() && !r.is_empty() && !f.is_empty() => {
+            (Some(o), Some(r), Some(f)) if valid_name(o) && valid_name(r) && valid_subpath(f) && valid_subpath(&rev) => {
                 out.push((o.to_string(), r.to_string(), rev, f.to_string()))
             }
-            _ => return Err(format!("bad hf spec {part:?}")),
+            _ => return Err(format!("bad hf spec {part:?}: owner, repo, file and revision must be plain names without `..`, backslashes or absolute paths")),
         }
     }
     Ok(out)
@@ -316,7 +333,7 @@ impl Puller {
         for attempt in 0..4 {
             match src.read_at(s, (e - s) as usize) {
                 Ok(buf) if buf.len() as u64 == e - s => {
-                    write_all_at(&file, &buf, s).map_err(|er| er.to_string())?;
+                    write_all_at(file, &buf, s).map_err(|er| er.to_string())?;
                     let mut sc = self.sidecars[si].lock().unwrap();
                     writeln!(sc, "{s} {e}").map_err(|er| er.to_string())?;
                     let mut st = self.state.lock().unwrap();
@@ -469,6 +486,26 @@ mod tests {
         std::fs::write(&p, b"abc").unwrap();
         assert_eq!(sha256_file(&p).unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hf_specs_cannot_leave_the_download_directory() {
+        assert!(hf_parts("hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf").is_ok());
+        assert!(hf_parts("hf:o/r/dir/file.gguf@refs/pr/1").is_ok());
+        for bad in [
+            "hf:o/r/../../../etc/x.gguf",
+            "hf:../r/f.gguf",
+            "hf:o/../f.gguf",
+            "hf:o/r//f.gguf",
+            "hf:o/r/./f.gguf",
+            "hf:o/r/a\\b.gguf",
+            "hf:o/r/f.gguf@../../x",
+            "hf:o/r/f.gguf@",
+            "hf:/r/f.gguf",
+            "hf:o/r/",
+        ] {
+            assert!(hf_parts(bad).is_err(), "{bad} should be rejected");
+        }
     }
 }
 

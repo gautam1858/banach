@@ -23,7 +23,8 @@ usage:
       measure this machine and save the profile
   banach inspect MODEL [--json]
       read the model header only (local path, https URL, or hf:owner/repo/file.gguf)
-  banach plan MODEL [--ctx N] [--min-tok-s X] [--usage FILE] [--hw FILE] [--json]
+  banach plan MODEL [--ctx N] [--min-tok-s X] [--usage FILE] [--hw FILE] [--vram-experts] [--json]
+      (--vram-experts projects a GPU expert cache, which banach-engine does not have yet)
       (--ctx is the context length decode runs at; attention cost grows with it)
       preflight card: predicted speed and fidelity per plan, before downloading weights
       (--hw plans for another machine from its saved hardware.json)
@@ -39,10 +40,11 @@ usage:
   banach pull hf:OWNER/REPO/FILE.gguf [--out DIR] [--usage FILE] [--workers N]
       resumable download: header and dense tensors first, hot experts next (with --usage),
       SHA-256 checked against the Hugging Face LFS object id
-  banach serve MODEL [--host H] [--port P] [--ctx N] [--budget-mb N] [--gpu-layers N] [--lazy]
+  banach serve MODEL [--host H] [--port P] [--api-key KEY] [--ctx N] [--budget-mb N] [--gpu-layers N] [--lazy]
                [--ladder LOW.gguf --eps FILE --tau T --target P --min-margin M --period N]
       OpenAI (/v1/chat/completions) and Anthropic (/v1/messages) compatible server on
-      127.0.0.1:8080; MODEL may be hf:... (downloaded first, or served while downloading
+      127.0.0.1:8080 (--api-key or $BANACH_API_KEY requires a key; use one with any non-loopback
+      --host); MODEL may be hf:... (downloaded first, or served while downloading
       with --lazy); with a ladder, shadow replays feed the fidelity meter and tau controller
   banach certify FLIPS [--target P] [--alpha A] [--min-margin M]
       anytime-valid certificate that the top-1 flip rate is below P (default 0.01), from a
@@ -275,7 +277,12 @@ fn wrap(s: &str, w: usize) -> Vec<String> {
 }
 
 fn constraints(a: &Args) -> Result<Constraints, String> {
-    let mut c = Constraints { ctx: num(a, "ctx", 8192)?, min_tok_s: num(a, "min-tok-s", 5.0)?, ..Default::default() };
+    let mut c = Constraints {
+        ctx: num(a, "ctx", 8192)?,
+        min_tok_s: num(a, "min-tok-s", 5.0)?,
+        vram_experts: a.switches.contains("vram-experts"),
+        ..Default::default()
+    };
     if let Some(u) = a.flags.get("usage") {
         let s = std::fs::read_to_string(u).map_err(|e| format!("{u}: {e}"))?;
         let v: serde_json::Value = serde_json::from_str(&s).map_err(|e| format!("{u}: {e}"))?;
@@ -373,7 +380,7 @@ fn cmd_pick(a: &Args) -> Result<(), String> {
     }
     // models that meet the target, biggest first; then the rest, fastest first
     let (mut fast, mut slow): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.tok_s >= c.min_tok_s);
-    fast.sort_by(|x, y| y.params.cmp(&x.params));
+    fast.sort_by_key(|r| std::cmp::Reverse(r.params));
     slow.sort_by(|x, y| y.tok_s.partial_cmp(&x.tok_s).unwrap_or(std::cmp::Ordering::Equal));
 
     if a.switches.contains("json") {
@@ -385,12 +392,13 @@ fn cmd_pick(a: &Args) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&all).unwrap());
         return Ok(());
     }
+    let disk = hw.disk_bw.map(|d| format!("{:.1} GB/s", d / 1e9)).unwrap_or_else(|| "unmeasured".into());
     println!(
-        "machine: {}, {} RAM, {} memory bandwidth, {} disk",
+        "machine: {}, {} RAM, {:.0} GB/s memory bandwidth, {} disk",
         hw.cpu,
         gb(hw.ram_available as f64),
-        format!("{:.0} GB/s", hw.mem_bw / 1e9),
-        hw.disk_bw.map(|d| format!("{:.1} GB/s", d / 1e9)).unwrap_or_else(|| "unmeasured".into())
+        hw.mem_bw / 1e9,
+        disk
     );
     println!("exact weights only; speeds are predictions from headers (ctx {}), target {:.1} tok/s\n", c.ctx, c.min_tok_s);
     let print = |title: &str, rows: &[Row]| {
@@ -399,12 +407,12 @@ fn cmd_pick(a: &Args) -> Result<(), String> {
             println!("  (none)\n");
             return;
         }
-        println!("  {:<34} {:>8} {:>9} {:>11}   {}", "model", "params", "on disk", "tok/s", "range");
+        println!("  {:<34} {:>8} {:>9} {:>11}   range", "model", "params", "on disk", "tok/s");
         for r in rows {
             println!(
-                "  {:<34} {:>7.0}B {:>9} {:>11.1}   {:.1} to {:.1}",
+                "  {:<34} {:>8} {:>9} {:>11.1}   {:.1} to {:.1}",
                 r.label,
-                r.params as f64 / 1e9,
+                if r.params >= 1_000_000_000 { format!("{:.0}B", r.params as f64 / 1e9) } else { format!("{:.0}M", r.params as f64 / 1e6) },
                 gb(r.size as f64),
                 r.tok_s,
                 r.low,
@@ -524,7 +532,7 @@ fn cmd_compare(a: &Args) -> Result<(), String> {
     let (Some(reference), Some(candidate)) = (a.pos.first(), a.pos.get(1)) else {
         return Err("compare needs REFERENCE.gguf CANDIDATE.gguf".into());
     };
-    if a.flags.get("f").is_none() && a.flags.get("p").is_none() {
+    if !a.flags.contains_key("f") && !a.flags.contains_key("p") {
         return Err("compare needs the text to score: -f FILE or -p TEXT".into());
     }
     let tmp = std::env::temp_dir().join(format!("banach-compare-{}", std::process::id()));
@@ -715,6 +723,7 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     };
     let model_id = model.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "model".into());
     let opts = serve::ServeOptions {
+        api_key: a.flags.get("api-key").cloned().or_else(|| std::env::var("BANACH_API_KEY").ok()).filter(|k| !k.is_empty()),
         engine: engine_path()?,
         model,
         model_id,
@@ -751,7 +760,7 @@ fn main() -> ExitCode {
         "pick" => parse_args(rest, &["ctx", "min-tok-s", "hw"]).and_then(|a| cmd_pick(&a)),
         "run" => parse_args(rest, &["ctx", "min-tok-s", "usage", "p", "f", "n", "budget-mb", "gpu-layers"]).and_then(|a| cmd_run(&a)),
         "pull" => parse_args(rest, &["out", "usage", "workers"]).and_then(|a| cmd_pull(&a)),
-        "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "gpu-layers", "budget-mb", "ladder", "eps", "tau", "target",
+        "serve" => parse_args(rest, &["host", "port", "ctx", "threads", "gpu-layers", "api-key", "budget-mb", "ladder", "eps", "tau", "target",
                                       "min-margin", "period", "shadow-every", "out", "usage", "workers"])
             .and_then(|a| cmd_serve(&a)),
         "certify" => parse_args(rest, &["target", "alpha", "min-margin"]).and_then(|a| cmd_certify(&a)),

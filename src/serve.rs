@@ -4,12 +4,19 @@
 //!   GET  /v1/models             OpenAI model list
 //!   POST /v1/messages           Anthropic messages, stream or not
 //!   GET  /banach/status         engine, ladder and fidelity meter state
+//!   GET  /health                liveness only
 //!
 //! Requests run one at a time on a persistent banach-engine worker (line-delimited JSON over
 //! its stdin/stdout). With a ladder installed, every response is followed by a shadow replay
 //! on the exact model; flips on confident tokens feed the betting meter, and the PI
 //! controller moves tau so the meter's upper bound stays under the budget. Binds to
 //! 127.0.0.1 unless told otherwise: the server is local by design.
+//!
+//! Hardening: on a loopback address only loopback Host headers are served (a web page cannot
+//! reach the model through DNS rebinding), POST bodies must be application/json (so a
+//! cross-site form cannot trigger a generation) and no CORS headers are ever sent. With
+//! `--api-key` every route except /health needs `Authorization: Bearer KEY` or `x-api-key: KEY`.
+//! At most MAX_INFLIGHT requests are handled at once; the rest get 503.
 
 use crate::fidelity::{Meter, TauController};
 use crate::pull::Puller;
@@ -18,12 +25,14 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ServeOptions {
+    /// Require this key on every route except /health.
+    pub api_key: Option<String>,
     pub engine: PathBuf,
     pub model: PathBuf,
     pub model_id: String,
@@ -161,7 +170,11 @@ struct App {
     opts: ServeOptions,
     ladder: bool,
     counter: AtomicU64,
+    inflight: AtomicUsize,
 }
+
+/// Requests handled at once (each one holds a thread; the engine itself runs one at a time).
+const MAX_INFLIGHT: usize = 64;
 
 /// A request after API normalisation (OpenAI-format messages and tools).
 #[derive(Debug)]
@@ -352,7 +365,7 @@ impl App {
     fn shadow(&self, eng: &mut EngineProc, done: &Value, argmax: &[i64]) {
         let mut m = self.meter.lock().unwrap();
         m.responses += 1;
-        if m.shadow_every == 0 || (m.responses - 1) % m.shadow_every != 0 || argmax.is_empty() {
+        if m.shadow_every == 0 || !(m.responses - 1).is_multiple_of(m.shadow_every) || argmax.is_empty() {
             return;
         }
         let toks = done["tokens"].as_array().cloned().unwrap_or_default();
@@ -411,7 +424,7 @@ impl App {
         let eng = self.engine.lock().unwrap();
         json!({
             "model": self.opts.model_id,
-            "engine": eng.ready,
+            "engine": redact_paths(&eng.ready),
             "ladder": self.ladder,
             "tau": m.tau,
             "fidelity": {
@@ -676,15 +689,113 @@ fn handle_anthropic(app: Arc<App>, req: tiny_http::Request, body: Value) {
     });
 }
 
+/// Absolute paths in a JSON value become bare file names: status output must not reveal where
+/// models live on disk.
+fn redact_paths(v: &Value) -> Value {
+    match v {
+        Value::String(s) => {
+            let looks_absolute = s.starts_with('/') || s.starts_with('\\') || s.as_bytes().get(1) == Some(&b':') && s.contains('\\');
+            if looks_absolute {
+                Value::String(s.rsplit(['/', '\\']).next().unwrap_or("").to_string())
+            } else {
+                v.clone()
+            }
+        }
+        Value::Array(a) => Value::Array(a.iter().map(redact_paths).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), redact_paths(x))).collect()),
+        _ => v.clone(),
+    }
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// DNS-rebinding guard: when the server is bound to a loopback address, a request must name a
+/// loopback host. A missing Host header (HTTP/1.0 tools) is allowed: browsers always send one.
+fn host_allowed(host_header: Option<&str>, bind: &str) -> bool {
+    if !is_loopback(bind) {
+        return true;
+    }
+    let Some(h) = host_header else { return true };
+    let name = match h.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h),
+    };
+    matches!(name.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1")
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// API key check: `Authorization: Bearer KEY` (OpenAI style) or `x-api-key: KEY` (Anthropic style).
+fn authorized(key: Option<&str>, authorization: Option<&str>, x_api_key: Option<&str>) -> bool {
+    let Some(key) = key else { return true };
+    let bearer = authorization.and_then(|a| a.strip_prefix("Bearer ").or_else(|| a.strip_prefix("bearer ")));
+    [bearer, x_api_key].into_iter().flatten().any(|c| ct_eq(c.as_bytes(), key.as_bytes()))
+}
+
+fn is_json_content_type(ct: Option<&str>) -> bool {
+    ct.map(|c| c.trim().to_ascii_lowercase().starts_with("application/json")).unwrap_or(false)
+}
+
+fn header_value(req: &tiny_http::Request, name: &'static str) -> Option<String> {
+    req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string())
+}
+
+struct InflightGuard(Arc<App>);
+
+impl InflightGuard {
+    fn enter(app: &Arc<App>) -> Option<Self> {
+        if app.inflight.fetch_add(1, Ordering::SeqCst) >= MAX_INFLIGHT {
+            app.inflight.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(InflightGuard(Arc::clone(app)))
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn reject(req: tiny_http::Request, status: u16, kind: &str, message: &str) {
+    respond_json(req, status, &json!({"error": {"message": message, "type": kind}}))
+}
+
 fn route(app: Arc<App>, mut req: tiny_http::Request) {
+    let Some(_guard) = InflightGuard::enter(&app) else {
+        return reject(req, 503, "overloaded", "too many requests in flight");
+    };
     let method = req.method().as_str().to_string();
     let path = req.url().split('?').next().unwrap_or("").to_string();
+    if !host_allowed(header_value(&req, "Host").as_deref(), &app.opts.host) {
+        return reject(req, 403, "forbidden", "Host header not allowed for a loopback server");
+    }
+    if method == "OPTIONS" {
+        // no CORS: a browser preflight must fail
+        return reject(req, 405, "method_not_allowed", "cross-origin requests are not supported");
+    }
+    if path != "/health"
+        && !authorized(
+            app.opts.api_key.as_deref(),
+            header_value(&req, "Authorization").as_deref(),
+            header_value(&req, "x-api-key").as_deref(),
+        )
+    {
+        return reject(req, 401, "authentication_error", "missing or wrong API key");
+    }
+    if method == "POST" && !is_json_content_type(header_value(&req, "Content-Type").as_deref()) {
+        return reject(req, 415, "invalid_request_error", "POST bodies must be application/json");
+    }
     let mut raw = String::new();
-    if method == "POST" {
-        if req.as_reader().take(32 << 20).read_to_string(&mut raw).is_err() {
+    if method == "POST"
+        && req.as_reader().take(32 << 20).read_to_string(&mut raw).is_err() {
             return respond_json(req, 400, &json!({"error": {"message": "body is not UTF-8 text", "type": "invalid_request_error"}}));
         }
-    }
     let body: Value = if raw.is_empty() { Value::Null } else {
         match serde_json::from_str(&raw) {
             Ok(v) => v,
@@ -699,17 +810,21 @@ fn route(app: Arc<App>, mut req: tiny_http::Request) {
             respond_json(req, 200, &json!({"object": "list", "data": [
                 {"id": id, "object": "model", "created": 0, "owned_by": "banach"}]}))
         }
-        ("GET", "/banach/status") | ("GET", "/health") => {
+        ("GET", "/banach/status") => {
             let st = app.status();
             respond_json(req, 200, &st)
         }
+        ("GET", "/health") => respond_json(req, 200, &json!({"status": "ok"})),
         _ => respond_json(req, 404, &json!({"error": {"message": format!("no route for {method} {path}"), "type": "not_found"}})),
     }
 }
 
 pub fn serve(opts: ServeOptions) -> Result<(), String> {
-    if opts.host != "127.0.0.1" && opts.host != "localhost" && opts.host != "::1" {
-        eprintln!("warning: listening on {}: anyone who can reach this address can use the model", opts.host);
+    if !is_loopback(&opts.host) && opts.api_key.is_none() {
+        eprintln!(
+            "warning: listening on {} without --api-key: anyone who can reach this address can use the model",
+            opts.host
+        );
     }
     let engine = EngineProc::start(&opts)?;
     let ladder = engine.ready["ladder"].as_bool().unwrap_or(false);
@@ -731,7 +846,7 @@ pub fn serve(opts: ServeOptions) -> Result<(), String> {
     eprintln!(
         "banach serve: http://{addr}  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, status: /banach/status)"
     );
-    let app = Arc::new(App { engine: Mutex::new(engine), meter: Mutex::new(meter), opts, ladder, counter: AtomicU64::new(1) });
+    let app = Arc::new(App { engine: Mutex::new(engine), meter: Mutex::new(meter), opts, ladder, counter: AtomicU64::new(1), inflight: AtomicUsize::new(0) });
     for req in server.incoming_requests() {
         let app = Arc::clone(&app);
         std::thread::spawn(move || route(app, req));
@@ -796,5 +911,50 @@ mod tests {
         let with_call = o(json!({"finish_reason": "stop"}), vec![call]);
         assert_eq!(finish_anthropic(&with_call).0, "tool_use");
         assert_eq!(finish_openai(with_call.finish()), "tool_calls");
+    }
+
+    #[test]
+    fn loopback_server_refuses_foreign_host_headers() {
+        assert!(host_allowed(Some("127.0.0.1:8080"), "127.0.0.1"));
+        assert!(host_allowed(Some("localhost"), "127.0.0.1"));
+        assert!(host_allowed(Some("LOCALHOST:9"), "localhost"));
+        assert!(host_allowed(Some("[::1]:8080"), "::1"));
+        assert!(host_allowed(None, "127.0.0.1"));
+        assert!(!host_allowed(Some("evil.example"), "127.0.0.1"));
+        assert!(!host_allowed(Some("evil.example:8080"), "localhost"));
+        assert!(!host_allowed(Some("127.0.0.1.evil.example"), "127.0.0.1"));
+        // a server bound to another address serves whatever host names reach it
+        assert!(host_allowed(Some("box.lan:8080"), "0.0.0.0"));
+    }
+
+    #[test]
+    fn api_key_checks() {
+        assert!(authorized(None, None, None));
+        assert!(!authorized(Some("k"), None, None));
+        assert!(authorized(Some("k"), Some("Bearer k"), None));
+        assert!(authorized(Some("k"), None, Some("k")));
+        assert!(!authorized(Some("k"), Some("Bearer K"), None));
+        assert!(!authorized(Some("k"), Some("Bearer kk"), Some("")));
+        assert!(!authorized(Some("k"), Some("k"), None));
+    }
+
+    #[test]
+    fn only_json_posts_are_accepted() {
+        assert!(is_json_content_type(Some("application/json")));
+        assert!(is_json_content_type(Some("Application/JSON; charset=utf-8")));
+        assert!(!is_json_content_type(Some("text/plain")));
+        assert!(!is_json_content_type(Some("application/x-www-form-urlencoded")));
+        assert!(!is_json_content_type(None));
+    }
+
+    #[test]
+    fn status_does_not_reveal_paths() {
+        let v = json!({"model": "/home/me/models/x.gguf", "n": 3, "list": ["C:\\Users\\me\\y.gguf", "plain"], "nested": {"p": "/etc/x"}});
+        let r = redact_paths(&v);
+        assert_eq!(r["model"], "x.gguf");
+        assert_eq!(r["n"], 3);
+        assert_eq!(r["list"][0], "y.gguf");
+        assert_eq!(r["list"][1], "plain");
+        assert_eq!(r["nested"]["p"], "x");
     }
 }

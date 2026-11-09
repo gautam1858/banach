@@ -7,8 +7,8 @@
 <h3 align="center">A trillion parameters on the computer you already own.</h3>
 
 <p align="center">
-  Run Mixture-of-Experts models <b>bigger than your RAM</b>, faster than llama.cpp,<br>
-  with <b>byte-for-byte the same answers</b>. Know the speed <b>before</b> you download a single weight.
+  Run Mixture-of-Experts models <b>bigger than your RAM</b>, with <b>byte-for-byte the same answers</b><br>
+  as llama.cpp. Know the speed <b>before</b> you download a single weight.
 </p>
 
 <p align="center">
@@ -28,25 +28,34 @@
 ---
 
 <p align="center">
-  <img src="brand/hero-card.svg" alt="Kimi K2, one trillion parameters, on a desktop with 64 GB of RAM and one RTX 5080: 3.6 tokens per second with lossless expert streaming, per banach plan" width="900">
+  <img src="brand/hero-card.svg" alt="Kimi K2, one trillion parameters, on a desktop with 64 GB of RAM and one RTX 5080: about 3.3 tokens per second with lossless expert streaming, a banach plan estimate" width="900">
 </p>
 
 ## The giants on your machine
 
-The biggest open models in the world, on machines you can buy at a normal shop. Speeds from
-`banach plan`, which reads only the model headers. It under-promises: on the model we
-measured end to end it said **2.1 tok/s**, and Banach delivered **5.4 tok/s**.
+What `banach plan` says, from model headers alone, for the biggest open models on three
+machines. **These are estimates, not measurements**, for the engine as it is today: with
+`--gpu-layers` the dense layers and KV cache go to the GPU and the routed experts stay in RAM
+and on NVMe. On the one big model measured end to end (Qwen3.6-35B on the 16 GB machine) the
+planner said 2.1 tok/s and the run gave 5.4.
 
-| Model | Parameters | On disk | 16 GB, 4 cores<br><sub>1.3 GB/s disk</sub> | 32 GB desktop<br><sub>DDR5, Gen4 NVMe, no GPU</sub> | 64 GB + RTX 5080<br><sub>2x Gen5 NVMe</sub> |
+| Model | Parameters | On disk | 16 GB, 4 cores<br><sub>measured disk 1.3 GB/s</sub> | 32 GB desktop<br><sub>DDR5, Gen4 NVMe, no GPU</sub> | 64 GB + RTX 5080<br><sub>2x Gen5 NVMe</sub> |
 |---|---:|---:|---:|---:|---:|
-| **Kimi K2** (UD-Q2_K_XL) | **1 trillion** | 382 GB | 0.2 tok/s | 1.0 tok/s | **3.6 tok/s** |
-| **DeepSeek V4 Flash** (UD-Q4_K_XL) | 284 B | 155 GB | 0.4 tok/s | 2.2 tok/s | **10.0 tok/s** |
-| **Qwen3 235B-A22B** (UD-Q2_K_XL) | 235 B | 89 GB | 0.3 tok/s | 1.7 tok/s | **7.2 tok/s** |
-| **gpt-oss-120b** (F16) | 117 B | 65 GB | 1.0 tok/s | 4.9 tok/s | **24.2 tok/s** |
-| **GLM-4.5-Air** (UD-Q2_K_XL) | 106 B | 47 GB | 0.6 tok/s | 2.8 tok/s | **14.9 tok/s** |
-| **Qwen3.6-35B-A3B** (UD-Q4_K_M) | 35 B | 22 GB | **5.4 tok/s measured** | 8.8 tok/s | **80.6 tok/s** |
+| **Kimi K2** (UD-Q2_K_XL) | 1 trillion | 382 GB | 0.2 tok/s (*) | 1.0 tok/s (*) | **3.3 tok/s (*)** |
+| **DeepSeek V4 Flash** (UD-Q4_K_XL) | 284 B | 155 GB | 0.4 tok/s (*) | 2.2 tok/s (*) | **9.2 tok/s** |
+| **Qwen3 235B-A22B** (UD-Q2_K_XL) | 235 B | 89 GB | 0.3 tok/s (*) | 1.7 tok/s | **6.2 tok/s** |
+| **gpt-oss-120b** (F16) | 117 B | 65 GB | 1.0 tok/s (*) | 4.9 tok/s | **20.7 tok/s** |
+| **GLM-4.5-Air** (UD-Q2_K_XL) | 106 B | 47 GB | 0.6 tok/s (*) | 2.8 tok/s | **12.4 tok/s** |
+| **Qwen3.6-35B-A3B** (UD-Q4_K_M) | 35 B | 22 GB | **5.4 tok/s measured** | 8.8 tok/s | **48.5 tok/s** |
 
-Exact weights in every cell, no lossy shortcuts. Ask about your own machine in ten seconds:
+(*) Fewer than 23% of the experts fit in memory. The planner was compared with measurements
+down to that point (Granite, 300 MB budget) and not below, so these cells extrapolate. The 16 GB
+column is the VM we measured on; the 32 GB and 64 GB columns are reference hardware profiles
+(`phase1/machines/`), not machines we ran. Details: [docs/VALIDATION.md](docs/VALIDATION.md).
+
+A GPU expert cache (not built yet) would lift the 64 GB column, for example Qwen3.6-35B from
+48.5 to 80.6 tok/s and Kimi K2 from 3.3 to 3.6; `banach plan --vram-experts` shows that
+projection. Ask about your own machine in ten seconds:
 
 ```bash
 banach probe && banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf
@@ -65,13 +74,15 @@ $ pip install banach
 $ banach plan hf:unsloth/Kimi-K2-Instruct-GGUF/UD-Q2_K_XL/Kimi-K2-Instruct-UD-Q2_K_XL-00001-of-00008.gguf --hw phase1/machines/ref-64gb-rtx5080.json
 | Kimi-K2-Instruct  (deepseek2)                                          |
 | 381.9 GB on disk, 384 experts x 60 layers, top-8                       |
-| Exact                3.56 tok/s  (range 3.00 to 4.12)                  |
+| Exact                3.32 tok/s  (range 2.81 to 3.83)                  |
+|   - only 17% of the experts fit in memory; the planner was checked     |
+|   against measurements down to 23%, so this estimate is not validated |
 
-# a 22 GB model on a 16 GB machine, from a cold start
+# a 22 GB model on a 16 GB machine
 $ banach-engine -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -f story.txt -n 256 --budget-mb 10000
 banach: prefill 18 tok 3.44 s; decode 256 tok 5.40 tok/s, hit 95.7% (page cache 95.7%)
 
-# and the answers are the exact ones
+# and the answers are the exact ones (checked for 64 tokens)
 $ banach-engine -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -f story.txt -n 64 --budget-mb 10000 --exact-check
 exact-check: PASS byte-identical (64 tokens, logits bit-equal at every step)
 ```
@@ -93,32 +104,42 @@ bytes in 4 KB at a time with no idea which experts come next. Banach knows the m
   set and the split across GPU, RAM and disk before you download anything.
 - **Stream on purpose.** Whole experts, fetched in parallel the moment the router picks them,
   inside a RAM budget you choose. Experts earn their place by how often they are used.
-- **Prove it.** Every configuration is checked against stock llama.cpp, token for token and
-  logit for logit, in CI on every commit. Optional faster low-precision experts come with a
-  live fidelity meter, so a shortcut is never silent.
+- **Check it.** Streaming is compared with stock llama.cpp, token for token and logit for
+  logit: 12 configurations on a small MoE in CI on every commit (Linux, macOS, Windows), and
+  64 tokens by hand on the 22 GB model below.
+- **Measure shortcuts.** A separate low-precision mode (it does not combine with streaming
+  yet) comes with a live fidelity meter, and `banach compare` scores any quantization against
+  a reference, so a shortcut is never silent.
 
 ## Proof: a model bigger than RAM, measured end to end
 
-**A 22 GB model on a 16 GB machine.** Qwen3.6-35B-A3B (Q4_K_M) on a 4-core cloud VM with no
-swap and a 1.27 GB/s disk. Cold start, same prompt, same greedy decode.
+Qwen3.6-35B-A3B (Q4_K_M, 22.1 GB) on a 4-core cloud VM (a container with a memory limit) with
+16 GB of RAM, no swap and a 1.27 GB/s disk when measured. Greedy decode, 256 tokens, experts
+capped at 10 GB. Three runs, each stock vs Banach back to back:
 
-| | stock llama.cpp | **Banach** | |
-|---|---:|---:|---|
-| Default settings | **crashed: out of memory** | **runs** | llama.cpp copies the weights into RAM; Banach streams them |
-| Model size vs RAM | | **138%** | 22.1 GB of model, 16 GB of RAM |
-| Prompt processing | 7.64 s | **3.44 s** | **2.2x faster** |
-| Generation | 4.89 tok/s | **5.40 tok/s** | **+10%** |
-| RAM for experts | all it can take | **10 GB, capped** | the rest of your machine stays usable |
-| Output | reference | **identical** | every token, every logit, bit for bit |
-| Read before you know the speed | the whole 22 GB | **16 MB** | `banach plan` reads 0.07% of the file |
+| Run | Prompt processing, stock | Prompt processing, Banach | Generation, stock | Generation, Banach |
+|---|---:|---:|---:|---:|
+| 1 (32 tokens) | 9.32 s | 3.49 s | 3.54 tok/s | 3.98 tok/s |
+| 2 (256 tokens) | 7.64 s | 3.44 s | 4.89 tok/s | 5.40 tok/s |
+| 3 (64 tokens, with the exactness check) | 9.30 s | 2.68 s | 3.36 tok/s | 5.44 tok/s |
 
-Squeeze the RAM budget further and race llama.cpp paging experts in at that same budget:
-**2.1x faster generation**. The stock llama.cpp speed rows run with weight repacking off, the
-only way it runs here. Machine, commit and command for every number:
-[docs/VALIDATION.md](docs/VALIDATION.md).
+- **Prompt processing: Banach was 2.2x to 3.5x faster in all three runs.**
+- **Generation: Banach was faster in all three runs, by 10% to 62%.** Stock llama.cpp itself
+  varied from 3.4 to 4.9 tok/s between runs, so one percentage would claim more than the data
+  supports.
+- **llama.cpp with its default settings was killed for running out of memory**: its weight
+  repacking copies the experts into ordinary RAM. The rows above use it with repacking off,
+  the only way it runs on this machine.
+- **Output identical** to llama.cpp for the 64 tokens checked, every logit bit for bit.
+- Against naive streaming (same 10 GB budget, the kernel paging experts in), Banach decoded
+  1.6x faster on the 32-token run and 1.1x on the 256-token run: the gap narrows as the hot
+  set fills RAM.
 
-**No approximations. No re-quantizing. No quality loss.** The exact weights stay on disk.
-Banach just moves them better.
+Limits of this evidence: three runs on one machine, the first stock run started with part of
+the file in the page cache, and the VM's disk has since been throttled to about 15 MB/s, so
+the runs cannot be repeated on it today. To measure on your machine, run
+`python3 bench/interleaved.py` (alternating stock and Banach runs, medians reported).
+Every number with its machine, commit and command: [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Get started in one line
 
@@ -161,15 +182,15 @@ Apple Silicon. Windows and GPU builds: [from source](#build-from-source).
 
 ## Runs everywhere
 
-| Platform | Backends | Expert streaming |
-|---|---|---|
-| Linux x86_64 and arm64 | CPU (AVX2, AVX-512, NEON), CUDA, Vulkan | full: hard RAM budget, parallel prefetch, residency checks |
-| Windows x86_64 | CPU (CUDA and Vulkan from source) | prefetch, working-set budget |
-| macOS, Apple Silicon | CPU, Metal | prefetch, soft budget |
-| Any GPU | `--gpu-layers N` | dense layers on the GPU, experts streamed from RAM |
+| Platform | Backends | Status | Expert streaming |
+|---|---|---|---|
+| Linux x86_64, arm64 | CPU (AVX2, AVX-512, NEON) | tested, byte-exact in CI | full: hard RAM budget, parallel prefetch, residency checks |
+| macOS, Apple Silicon | CPU | tested, byte-exact in CI | prefetch, soft budget |
+| Windows x86_64 | CPU | tested, byte-exact in CI; build from source | prefetch, working-set budget |
+| NVIDIA, AMD, Intel, Apple GPUs | CUDA, Vulkan, Metal | compiled in CI, **not yet run on a GPU** | dense layers on the GPU (`--gpu-layers N`), experts in RAM |
 
-Byte-exact against stock llama.cpp in CI on Linux x64, Linux arm64, macOS and Windows;
-CUDA and Vulkan builds compiled in CI.
+The CI exactness check is 12 configurations on a small MoE (15M parameters, 16 tokens each).
+The GPU rows are build checks only; no benchmark has been run on a GPU yet.
 
 ## Everything in the box
 
@@ -213,9 +234,14 @@ export BANACH_ENGINE=$PWD/build-engine/banach-engine
   `build-engine\banach-engine.exe`.
 - A source build is tuned for your exact CPU and is faster still.
 
-Good to know: one request at a time (others queue); the hard RAM budget is Linux, while macOS
-and Windows give identical output with a softer budget; small models (1 to 3B) call tools fine
-but are weak coding agents.
+Good to know:
+- One request at a time; others queue.
+- The hard RAM budget is Linux. macOS and Windows give identical output with a softer budget.
+- The low-precision ladder and expert streaming do not combine yet: the ladder needs the model
+  in RAM, streaming is lossless only.
+- `banach serve` listens on localhost only. For other machines use `--host 0.0.0.0 --api-key KEY`
+  (or `BANACH_API_KEY`); clients then send `Authorization: Bearer KEY` or `x-api-key: KEY`.
+- Small models (1 to 3B) call tools fine but are weak coding agents.
 
 ## Join in
 

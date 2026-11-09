@@ -126,7 +126,7 @@ pub fn build(parts: &[Gguf]) -> Result<ModelProfile, String> {
         });
     }
     let n_moe = layers.len() as u64;
-    let expert_bytes = if n_moe > 0 { layers.iter().map(|l| l.expert_bytes).sum::<u64>() / n_moe } else { 0 };
+    let expert_bytes = layers.iter().map(|l| l.expert_bytes).sum::<u64>().checked_div(n_moe).unwrap_or(0);
     let routed_read = layers.iter().map(|l| l.expert_bytes * top_k).sum();
     let n_experts = if n_experts == 0 { layers.first().map(|l| l.n_experts).unwrap_or(0) } else { n_experts };
 

@@ -8,8 +8,11 @@ BANACH-SPEC section 7 (non-negotiable 4).
 Machine: 4-thread Xeon @ 2.1 GHz VM, 16.9 GB RAM, no swap, 19.7 GB/s memory, disk 1.27 GB/s
 (random 8 MiB O_DIRECT reads, `banach probe`). Model: unsloth Qwen3.6-35B-A3B-UD-Q4_K_M
 (22.1 GB, 40 MoE layers x 256 experts, top-8). Commit c3daa34, llama.cpp 9309bf1 + ladder
-patch. Every run starts cold (the whole file dropped from the page cache), greedy decode,
-`-c 2048 -t 4`, CPU weight repacking off in all modes.
+patch. Greedy decode, `-c 2048 -t 4`, CPU weight repacking off in all modes. The machine is a
+container with a memory limit (the stock-llama.cpp out-of-memory kill below happened at 13.9 GB
+resident). Banach and naive runs evict the routed experts at start (`--cold`, the default);
+stock llama.cpp has no such step, so the page cache a run found depended on what ran before it:
+the 32-token stock run came first after the download and had part of the file cached.
 
 ```
 banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode MODE [--budget-mb 10000]
@@ -23,12 +26,18 @@ banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode M
 | 18-token prompt, 256 tokens | stock llama.cpp (mmap, no budget) | 7.64 s | 4.89 tok/s | - | - |
 | | naive, 10 GB expert budget | 5.27 s | 4.87 tok/s | 95.7% | 29.1 MB |
 | | banach, 10 GB expert budget | 3.44 s | 5.40 tok/s | 95.7% | 23.7 MB |
+| 18-token prompt, 64 tokens, `--exact-check` (stock first, then banach, same process) | stock llama.cpp | 9.30 s | 3.36 tok/s | - | - |
+| | banach, 10 GB expert budget | 2.68 s | 5.44 tok/s | 89.5% | 61.4 MB |
 
 - Byte-exact: `--mode banach --budget-mb 10000 --exact-check -n 64` PASS, 64 tokens with
   logits bit-equal to stock llama.cpp at every step.
-- Banach is 10 to 12% faster than stock llama.cpp at decode and 2.2 to 2.7x faster at
-  prefill, while holding routed experts to a 10 GB budget; stock llama.cpp is free to use the
-  whole page cache.
+- Prefill: banach is 2.7x, 2.2x and 3.5x faster than stock in the three stock-vs-banach pairs.
+  Decode: banach is faster in all three pairs, by 12%, 10% and 62%. Each pair is a single
+  run, the token counts differ and stock itself ranges from 3.36 to 4.89 tok/s, so no single
+  percentage is established; the README says "10% to 62%". Banach holds routed experts to a
+  10 GB budget while stock llama.cpp is free to use the whole page cache.
+- Naive vs banach at the same budget: decode 2.44 vs 3.98 tok/s (1.6x) on the 32-token run,
+  4.87 vs 5.40 (1.1x) on the 256-token run.
 - Planner (uncalibrated, generic hit curve): Exact 2.11 tok/s (1.87 to 2.35). Measured
   steady-state decode is 5.40 tok/s, outside the range: the generic hit curve predicted 90%
   hits at this budget, the run reached 95.7%, and the run is short enough that disk traffic
@@ -37,6 +46,16 @@ banach-engine -m qwen36-35b-a3b-Q4_K_M.gguf -f PROMPT -n N -c 2048 -t 4 --mode M
   AVX2), the routed experts are copied out of the mapping into anonymous memory; on this
   machine the process was killed for running out of memory at 13.9 GB resident. The engine
   now turns repacking off (`--no-repack` in llama.cpp terms).
+- Withdrawn: an earlier README line said "2.1x faster than naive page faulting at the same
+  budget, measured on a 1B MoE at 1 GB/s". The supporting run was never logged here and could
+  not be reproduced, so the claim was removed. The naive-vs-banach pairs above are the logged
+  evidence.
+- Repeat attempt, 9 Nov 2026: five interleaved stock-vs-banach pairs were started, but the
+  VM's disk had slowed to about 15 MB/s (`dd` with O_DIRECT: 15 MB/s on uncached regions,
+  2.5 GB/s on cached ones; `banach probe --disk` measured 0.01 GB/s against 1.27 GB/s earlier), so a
+  22 GB model could not be re-read in reasonable time and the run was abandoned. A cold stock
+  llama.cpp read of the file was seen at about 14 MB/s through page faults. The protocol is in
+  `bench/interleaved.py` for a machine with a healthy disk.
 
 ## banach compare: how far a candidate drifts from a reference
 
@@ -58,6 +77,53 @@ A 1B model at 3 bits drifts a lot; the point of the table is that the tool repor
 sanity row showing it does not invent drift. Strata publishes pack-level numbers of this kind
 (top-1 83.7% for its 2.00 bpw DeepSeek pack, against a Q8 reference); `banach compare` produces
 the same measurement for any pair of GGUFs, including packs and runtime modes other engines ship.
+
+## Where decode time goes on the 22 GB model (is prefetch worth building?)
+
+Same run as "Bigger than RAM" above: `--mode banach --budget-mb 10000`, 256 tokens, cold start,
+commit c3daa34 (engine JSON `long_q36_banach.json`).
+
+| Part of decode | Seconds | Share of 47.42 s |
+|---|---:|---:|
+| Waiting on expert fetches (critical path) | 6.68 | 14.1% |
+| Fetch plus admission and eviction bookkeeping (callback) | 7.47 | 15.7% |
+| Everything else (compute) | 39.95 | 84.3% |
+
+Expert hit rate 95.7%; 23.7 MB read from disk per token. The most that perfect next-layer
+prefetch could save is the fetch wait, about 14 to 16% of decode, and published fine-grained
+MoE results report recall of 65 to 80% and gains of 0 to 5% once reads are asynchronous. Below
+the 20% bar chosen for building a predictor, so no predictor is built; compute, not disk, is
+the bottleneck at this size. On a machine where the model is a larger multiple of RAM the
+split will shift: re-measure there before revisiting.
+
+## Planner table in the README ("The giants on your machine")
+
+`banach plan MODEL --hw PROFILE --json`, Exact (lossless) plan, ctx 8192, default 5 tok/s
+target. Profiles: the 16 GB VM as measured by `banach probe` (disk 1.27 GB/s, taken when the disk
+was healthy), phase1/machines/ref-32gb-ddr5-gen4.json and phase1/machines/ref-64gb-rtx5080.json
+(reference hardware, not machines we ran). Models are the first shard of each unsloth GGUF on
+Hugging Face; only headers are read. Values are the mid estimate with the low to high range, tok/s.
+
+The first three columns describe what `banach-engine` does today: with `--gpu-layers` the dense
+layers and KV cache sit on the GPU, routed experts stay in RAM and on NVMe (`engine/banach-engine.cpp`
+pins `ffn_*_exps` to host memory). The last column is `--vram-experts`, a projection that assumes
+a GPU expert cache the engine does not have.
+
+| Model | 16 GB VM | ref 32 GB | ref 64 GB + RTX 5080 (engine today) | same, with a VRAM expert cache (projection) |
+|---|---|---|---|---|
+| Kimi K2 (UD-Q2_K_XL) | 0.20 (0.16 to 0.25) | 1.04 (0.84 to 1.26) | 3.32 (2.81 to 3.83) | 3.56 (3.00 to 4.12) |
+| DeepSeek V4 Flash (UD-Q4_K_XL) | 0.44 (0.35 to 0.53) | 2.20 (1.82 to 2.60) | 9.18 (7.91 to 10.39) | 10.02 (8.64 to 11.35) |
+| Qwen3 235B-A22B (UD-Q2_K_XL) | 0.33 (0.26 to 0.39) | 1.73 (1.44 to 2.03) | 6.20 (5.60 to 6.76) | 7.20 (6.57 to 7.78) |
+| gpt-oss-120b (F16) | 0.98 (0.80 to 1.17) | 4.93 (4.18 to 5.66) | 20.68 (18.96 to 22.35) | 24.15 (22.12 to 26.10) |
+| GLM-4.5-Air (UD-Q2_K_XL) | 0.55 (0.46 to 0.64) | 2.77 (2.42 to 3.10) | 12.36 (11.42 to 13.25) | 14.89 (13.73 to 15.98) |
+| Qwen3.6-35B-A3B (UD-Q4_K_M) | 2.11 (1.87 to 2.35) | 8.76 (7.98 to 9.52) | 48.45 (44.42 to 52.34) | 80.60 (73.62 to 87.38) |
+
+Cells where fewer than 23% of the experts fit in memory carry the planner note "not validated":
+that is below the smallest expert share any measured run had (Granite at a 300 MB budget, 23%;
+the 22 GB run held 51%). An earlier README quoted the last column as the 64 GB result; that
+assumed an expert cache in VRAM. For comparison, a profile with no GPU at all gives Kimi K2 1.78
+tok/s, DeepSeek V4 Flash 3.15 and Qwen3.6-35B 8.76, so the GPU still counts today through the
+dense layers.
 
 ## Where decode time goes on the 22 GB model (is prefetch worth building?)
 

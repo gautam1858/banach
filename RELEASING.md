@@ -1,39 +1,47 @@
 # Releasing
 
-A release is one tag. `.github/workflows/release.yaml` builds Linux x86_64, Linux arm64 and
-macOS arm64 binaries, then publishes to GitHub Releases, PyPI, npm, crates.io and GHCR.
+Banach is published to PyPI only (`pip install banach`). The GitHub release also carries the
+Linux and macOS binary archives with checksums, for people who want the binaries without pip.
 
 ## One-time setup
 
-1. **PyPI** (no secret): on pypi.org, Account settings, Publishing, add a pending trusted
-   publisher: project `banach`, owner `gautam1858`, repository `banach`, workflow
-   `release.yaml`, environment `pypi`. In the GitHub repository create an environment named
-   `pypi` (Settings, Environments).
-2. **npm**: create an automation token on npmjs.com and add it as the repository secret
-   `NPM_TOKEN` (Settings, Secrets and variables, Actions). The packages published are
-   `banach`, `banach-linux-x64`, `banach-linux-arm64` and `banach-darwin-arm64`.
-3. **crates.io**: create an API token on crates.io and add it as the repository secret
-   `CARGO_REGISTRY_TOKEN`.
-4. **GHCR**: nothing to do; the workflow uses the built-in `GITHUB_TOKEN`. After the first
-   push, set the package `banach` to public under your GitHub profile's Packages.
-
-Registries whose secret is missing are skipped, so a release can go out to fewer places.
+1. **PyPI trusted publisher** (no secret): on pypi.org, Account settings, Publishing, add a
+   publisher for project `banach`, owner `gautam1858`, repository `banach`, workflow
+   `release.yaml`, environment `pypi`.
+2. **Protect the `pypi` environment**: in the GitHub repository, Settings, Environments, `pypi`,
+   tick "Required reviewers" and add yourself. A release then waits for your approval before
+   anything is uploaded, so a stray workflow run cannot publish.
 
 ## Each release
 
-1. Bump the version in `Cargo.toml`, `python/pyproject.toml`, `python/src/banach/__init__.py`,
-   `npm/banach/package.json` (version and the three `optionalDependencies`).
-2. Commit and push, then either push a tag:
+1. Bump the version in `Cargo.toml`, `python/pyproject.toml` and
+   `python/src/banach/__init__.py`, run `cargo build --release` so `Cargo.lock` follows, and
+   commit and push.
+2. On GitHub open Actions, pick "release", press "Run workflow" and type the version (for
+   example `0.1.4`). The workflow creates the tag and the release itself. (Pushing a `v*` tag
+   works too.)
+3. The workflow runs in this order, and stops at the first failure:
+   - **check**: the version strings in the three files above match.
+   - **build**: Linux x86_64, Linux arm64 and macOS arm64 binaries and wheels. The macOS leg is
+     allowed to fail (its runners are sometimes unavailable); the Linux wheels still ship.
+   - **smoke**: each Linux wheel is installed in a clean virtual environment, then the
+     byte-exact oracle (`engine/exact_check.sh`) and `scripts/smoke_test.sh` run against the
+     binaries inside it: `banach compare`, `banach pick`, the server's API key, Host check, CORS
+     and content-type rules, and a real completion.
+   - **github-release** and **pypi**: only if smoke passed. PyPI waits for the reviewer approval
+     from the setup above.
+4. Check the PyPI page. It can take a few minutes before `pip install banach==VERSION` finds the
+   new version; `pip install --no-cache-dir` helps.
 
-   ```bash
-   git tag v0.1.0 && git push origin v0.1.0
-   ```
+## Notices
 
-   or, without git: on GitHub open Actions, pick "release", press "Run workflow" and type
-   the version (for example `0.1.0`). The workflow creates the tag and the release itself.
+`THIRD_PARTY_NOTICES.md` ships in every wheel. Regenerate it when dependencies change, with the
+llama.cpp checkout the engine is built against:
 
-3. Check the run under Actions. The release page gets the tarballs and checksums that
-   `install.sh` downloads.
+```bash
+cargo fetch --locked
+python3 scripts/gen_third_party_notices.py ../llama.cpp > THIRD_PARTY_NOTICES.md
+```
 
 ## Inline video on the README
 

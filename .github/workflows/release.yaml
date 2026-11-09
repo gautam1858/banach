@@ -1,16 +1,16 @@
 name: release
 
-# Release by pushing a tag like v0.1.0, or from the Actions tab: "release" -> "Run workflow"
-# with a version (the workflow then creates the tag and the GitHub release itself).
-# One-time setup (see RELEASING.md):
-#   PyPI   trusted publisher for this repo and workflow (no secret needed)
+# Release from the Actions tab: "release" -> "Run workflow", type the version (for example 0.1.4).
+# The workflow checks that every version string matches, builds the binaries, installs the Linux
+# wheels in a clean environment and runs the byte-exact oracle and the end-to-end smoke test on
+# them, and only then creates the GitHub release and publishes to PyPI. Setup: RELEASING.md.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, e.g. 0.1.0 (must match Cargo.toml)"
+        description: "Version to release, e.g. 0.1.4 (must match Cargo.toml and python/pyproject.toml)"
         required: true
 
 permissions:
@@ -18,20 +18,22 @@ permissions:
 
 env:
   LLAMA_COMMIT: 9309bf1
-  # v0.1.0 from a pushed tag, or "v" + the version typed into "Run workflow"
+  STORIES_URL: https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/stories15M_MOE-Q8_0.gguf
+  STORIES_SHA: c7aa6863f9a4b3cdf19716e2c95622dcbd3bd06989324bf1ac8e60486ef8e881
+  # v0.1.4 from a pushed tag, or "v" + the version typed into "Run workflow"
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: the tag matches every package version
         run: |
           v="${RELEASE_TAG#v}"
           grep -q "^version = \"$v\"" Cargo.toml
           grep -q "^version = \"$v\"" python/pyproject.toml
-          grep -q "\"version\": \"$v\"" npm/banach/package.json
+          grep -q "__version__ = \"$v\"" python/src/banach/__init__.py
           echo "releasing $RELEASE_TAG"
 
   build:
@@ -41,19 +43,16 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            npm: linux-x64
             wheel: manylinux_2_28_x86_64
             runner: ubuntu-latest
             container: quay.io/pypa/manylinux_2_28_x86_64
             ggml: -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON
           - target: aarch64-unknown-linux-gnu
-            npm: linux-arm64
             wheel: manylinux_2_28_aarch64
             runner: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
             ggml: -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod
           - target: aarch64-apple-darwin
-            npm: darwin-arm64
             wheel: macosx_14_0_arm64
             runner: macos-14
             container: ""
@@ -64,7 +63,7 @@ jobs:
     continue-on-error: ${{ matrix.runner == 'macos-14' }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: tools
         shell: bash
         run: |
@@ -93,7 +92,7 @@ jobs:
           ninja -C build-engine banach-engine
       - name: cli
         shell: bash
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: package
         shell: bash
         run: |
@@ -102,27 +101,61 @@ jobs:
           tar -czf dist/banach-${{ matrix.target }}.tar.gz -C stage banach banach-engine
           if command -v sha256sum >/dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
           (cd dist && $sum banach-${{ matrix.target }}.tar.gz > banach-${{ matrix.target }}.tar.gz.sha256)
-          python3 -m pip wheel --help >/dev/null
           python/build_wheel.sh stage/banach stage/banach-engine ${{ matrix.wheel }} dist/wheels
-          npm/build_platform.sh ${{ matrix.npm }} stage/banach stage/banach-engine dist/npm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-${{ matrix.target }}
           path: dist/
 
-  github-release:
+  smoke:
+    # install the built Linux wheel in a clean environment and test the binaries it contains
     needs: build
-    if: ${{ !cancelled() && needs.build.result != 'failure' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: build-${{ matrix.target }}
+          path: dist
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: install the wheel in a clean environment
+        run: |
+          python -m venv venv
+          venv/bin/pip install dist/wheels/*.whl
+          test "$(venv/bin/banach --version)" = "banach ${RELEASE_TAG#v}"
+          echo "ENGINE=$(venv/bin/python -c 'import banach,os;print(os.path.join(os.path.dirname(banach.__file__),"bin","banach-engine"))')" >> $GITHUB_ENV
+      - name: tiny model
+        run: |
+          curl -fsSL -o stories.gguf "$STORIES_URL"
+          echo "$STORIES_SHA  stories.gguf" | sha256sum -c
+          echo "Once upon a time there was a robot who" > prompt.txt
+      - name: byte-exact oracle on the wheel's engine
+        run: engine/exact_check.sh "$ENGINE" stories.gguf prompt.txt 16
+      - name: end-to-end smoke test (compare, pick, server hardening, a completion)
+        run: scripts/smoke_test.sh venv/bin/banach "$ENGINE" stories.gguf prompt.txt
+
+  github-release:
+    needs: [build, smoke]
+    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
-          # only the build outputs (the Docker job also leaves a build record artifact)
           pattern: build-*
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
@@ -132,19 +165,18 @@ jobs:
           generate_release_notes: true
 
   pypi:
-    needs: build
-    if: ${{ !cancelled() && needs.build.result != 'failure' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+    needs: [build, smoke]
+    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
-          # only the build outputs (the Docker job also leaves a build record artifact)
           pattern: build-*
       - run: mkdir -p wheels && cp artifacts/*/wheels/*.whl wheels/ && ls -l wheels/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
           packages-dir: wheels/

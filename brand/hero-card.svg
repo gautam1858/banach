@@ -32,10 +32,10 @@
     <text x="480" y="322" fill="#8b949e" font-size="16">RTX 5080, 16 GB</text>
 
     <rect x="640" y="226" width="260" height="120" rx="16" fill="url(#hot)" fill-opacity="0.9"/>
-    <text x="770" y="290" fill="#ffffff" font-size="50" font-weight="800">3.6 tok/s</text>
+    <text x="770" y="290" fill="#ffffff" font-size="50" font-weight="800">3.3 tok/s</text>
     <text x="770" y="322" fill="#eef2ff" font-size="16">lossless streaming</text>
   </g>
 
   <text x="480" y="388" fill="#c9d1d9" font-size="17" font-weight="600" text-anchor="middle">382 GB model. 64 GB of memory. Experts streamed from NVMe on demand.</text>
-  <text x="480" y="412" fill="#6e7681" font-size="13" text-anchor="middle">speed from banach plan, which reads 16 MB of headers; it under-promised by 2.5x on the model we measured</text>
+  <text x="480" y="412" fill="#6e7681" font-size="13" text-anchor="middle">banach plan estimate from 16 MB of headers, for the engine as built today; not a measured run</text>
 </svg>
