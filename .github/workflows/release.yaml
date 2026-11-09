@@ -54,14 +54,17 @@ jobs:
             ggml: -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod
           - target: aarch64-apple-darwin
             wheel: macosx_14_0_arm64
-            runner: macos-14
+            runner: macos-15
             container: ""
             ggml: ""
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     # macOS runners are sometimes unavailable; the Linux wheels still ship without them
-    continue-on-error: ${{ matrix.runner == 'macos-14' }}
+    continue-on-error: ${{ matrix.runner == 'macos-15' }}
     timeout-minutes: 60
+    env:
+      # the macOS wheel is tagged macosx_14_0, so it must also run on macOS 14
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: tools
