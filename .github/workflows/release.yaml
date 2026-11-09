@@ -12,6 +12,10 @@ on:
       version:
         description: "Version to release, e.g. 0.1.4 (must match Cargo.toml and python/pyproject.toml)"
         required: true
+      dry_run:
+        description: "Build and smoke-test everything, but publish nothing (no tag, no GitHub release, no PyPI)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -149,7 +153,7 @@ jobs:
 
   github-release:
     needs: [build, smoke]
-    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && inputs.dry_run != true && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -169,7 +173,7 @@ jobs:
 
   pypi:
     needs: [build, smoke]
-    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !cancelled() && needs.build.result != 'failure' && needs.smoke.result == 'success' && inputs.dry_run != true && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

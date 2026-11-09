@@ -20,6 +20,8 @@ Linux and macOS binary archives with checksums, for people who want the binaries
 2. On GitHub open Actions, pick "release", press "Run workflow" and type the version (for
    example `0.1.4`). The workflow creates the tag and the release itself. (Pushing a `v*` tag
    works too.)
+   To rehearse without publishing anything, tick **dry_run**: every build and smoke step runs and
+   the GitHub release and PyPI upload are skipped.
 3. The workflow runs in this order, and stops at the first failure:
    - **check**: the version strings in the three files above match.
    - **build**: Linux x86_64, Linux arm64 and macOS arm64 binaries and wheels. The macOS leg is
