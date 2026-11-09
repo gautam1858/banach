@@ -118,14 +118,14 @@ pub fn mem_bandwidth(bytes: usize, threads: usize, reps: usize) -> f64 {
                     s.spawn(move || {
                         // four accumulators so the loop is bandwidth-bound, not latency-bound
                         let (mut a, mut b, mut cc, mut d) = (0u64, 0u64, 0u64, 0u64);
-                        let mut it = c.chunks_exact(4);
-                        for q in &mut it {
+                        let (quads, rest) = c.as_chunks::<4>();
+                        for q in quads {
                             a = a.wrapping_add(q[0]);
                             b = b.wrapping_add(q[1]);
                             cc = cc.wrapping_add(q[2]);
                             d = d.wrapping_add(q[3]);
                         }
-                        for x in it.remainder() {
+                        for x in rest {
                             a = a.wrapping_add(*x);
                         }
                         a ^ b ^ cc ^ d
