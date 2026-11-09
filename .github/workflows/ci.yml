@@ -124,6 +124,8 @@ jobs:
           engine/exact_check.sh "$exe" stories.gguf prompt.txt 16
       - name: end-to-end smoke test
         run: |
+          # Git Bash puts coreutils' `link` ahead of the MSVC linker; cargo needs the latter
+          if [ "$RUNNER_OS" = Windows ]; then rm -f /usr/bin/link; fi
           cargo build --release --locked
           engine=build-engine/banach-engine; cli=target/release/banach
           [ -f "$engine.exe" ] && engine="$engine.exe" && cli="$cli.exe"
