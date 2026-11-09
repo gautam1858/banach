@@ -18,7 +18,9 @@ assert d["top1_agreement"] == 1.0 and d["kl_mean"] == 0, d
 print("top-1 agreement", d["top1_agreement"], "KL", d["kl_mean"])'
 
 echo "== pick ranks a local model"
-"$banach" pick "$model" | tee /dev/stderr | grep -q 'tok/s'
+picked=$("$banach" pick "$model")
+echo "$picked"
+echo "$picked" | grep -q 'tok/s'
 
 echo "== server hardening and a completion"
 "$banach" serve "$model" --port "$port" --api-key testkey --ctx 512 >"$BANACH_HOME/serve.log" 2>&1 &

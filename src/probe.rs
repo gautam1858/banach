@@ -54,7 +54,48 @@ fn sysctl(key: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Physical memory on Windows: (total, available) from GlobalMemoryStatusEx.
+#[cfg(windows)]
+fn windows_ram() -> Option<(u64, u64)> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut m = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    // SAFETY: `m` is a valid, correctly sized MEMORYSTATUSEX with `length` set, as the API requires.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut m) } != 0;
+    ok.then_some((m.total_phys, m.avail_phys))
+}
+
 fn cpu_name() -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(id) = std::env::var("PROCESSOR_IDENTIFIER") {
+            return id;
+        }
+    }
     if let Some(s) = read_to_string("/proc/cpuinfo") {
         if let Some(l) = s.lines().find(|l| l.starts_with("model name")) {
             return l.split(':').nth(1).unwrap_or("").trim().to_string();
@@ -66,6 +107,12 @@ fn cpu_name() -> String {
 fn ram() -> (u64, u64) {
     if let (Some(t), Some(a)) = (meminfo("MemTotal:"), meminfo("MemAvailable:")) {
         return (t, a);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(r) = windows_ram() {
+            return r;
+        }
     }
     let t = sysctl("hw.memsize").and_then(|s| s.parse().ok()).unwrap_or(0);
     (t, t * 3 / 4)
@@ -327,5 +374,13 @@ mod tests {
     fn gpu_lookup() {
         assert_eq!(gpu_bandwidth_lookup("NVIDIA GeForce RTX 5080"), Some(960e9));
         assert_eq!(gpu_bandwidth_lookup("Mystery card"), None);
+    }
+
+    #[test]
+    fn memory_is_detected_on_every_platform() {
+        // this failed on Windows (0 GB available), which made every plan refuse to run there
+        let (total, available) = ram();
+        assert!(total > 0, "total RAM not detected");
+        assert!(available > 0 && available <= total, "available {available} of {total}");
     }
 }
