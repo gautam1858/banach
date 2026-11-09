@@ -102,7 +102,7 @@ jobs:
           if command -v sha256sum >/dev/null; then sum="sha256sum"; else sum="shasum -a 256"; fi
           (cd dist && $sum banach-${{ matrix.target }}.tar.gz > banach-${{ matrix.target }}.tar.gz.sha256)
           python/build_wheel.sh stage/banach stage/banach-engine ${{ matrix.wheel }} dist/wheels
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: build-${{ matrix.target }}
           path: dist/
